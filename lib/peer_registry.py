@@ -8,6 +8,8 @@ import sys
 import time
 import uuid
 
+from peer_mailbox import operate as mailbox
+
 ACTIVE = {'RUNNING', 'CONFIGURING', 'COMPLETING'}
 
 
@@ -37,7 +39,9 @@ def transact(root, request, scheduler, now=None):
         identity = request.get('peer_id')
         if identity and not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', identity):
             raise ValueError('invalid peer identity')
-        if op == 'register':
+        if op in ('send', 'inbox', 'outbox', 'ack', 'notifications'):
+            response = mailbox(state, request, now)
+        elif op == 'register':
             peer = state['peers'].setdefault(identity, {'jobs': [], 'last_grant': 0, 'registered': now})
             peer.update(heartbeat=now, fresh=True)
             if not request.get('preserve_demand') or 'ready' not in peer:

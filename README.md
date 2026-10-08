@@ -197,3 +197,31 @@ a new job. That advisory check does not hold a turn; `--peer-id --run-sbatch` is
 the coordinated submission path that protects concurrent admission. Workstreams
 without integration remain outside fair admission. After handoff the owner
 continues its existing model execution checks and cancellation policy.
+
+## Peer messages and receipts
+
+```bash
+bin/zen send --host my-cluster --peer-id project-a --to project-b \
+  --text 'Please hand off the next compatible GPU after your current lane finishes.' \
+  --request-id handoff-001
+bin/zen inbox --host my-cluster --peer-id project-b --mark-read --json
+bin/zen ack --host my-cluster --peer-id project-b --message-id MESSAGE_ID \
+  --text 'Handled: next released lane will go through fair admission.'
+bin/zen outbox --host my-cluster --peer-id project-a --include-acked --json
+```
+
+`send` targets a registered peer or `--to all`. Use `--message-file` for multiline
+bodies, `--request-id` to deduplicate retries, and `--reply-to` for linked replies.
+`inbox` returns up to 50 pending messages. Delivery, explicit reading (`--mark-read`)
+and handling (`ack` with a receipt) have separate timestamps. The sender can
+inspect receipts with `outbox --include-acked`. No observer marks messages read
+or handled on an agent's behalf. Notifications report counts only.
+
+`notifications` provides pending/unread counts for integration with an existing
+agent frontend or supervisor. Notification consumers should prompt the original
+agent to read its inbox at a safe turn boundary, then acknowledge only after
+handling the request. Mailbox messages do not themselves execute commands,
+change experiment ownership or cancel another peer's jobs. All peers share the
+login user's trust boundary; peer IDs are attribution, not cryptographic identities.
+Bodies and receipts are limited to 8000 UTF-8 bytes; each recipient may have at
+most 200 unacknowledged messages. Acknowledged messages persist for receipt audit.
