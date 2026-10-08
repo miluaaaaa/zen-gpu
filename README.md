@@ -156,3 +156,44 @@ Policy uses progress fields rather than matching error messages. Handoff means
 admission passed; it does not prove model startup or GPU execution. Unknown
 phases stop automatic retries. Transport/configuration exceptions also stop the
 invocation for diagnosis. No retry automatically restarts an admitted workload.
+
+## Coordinate independent workstreams
+
+All participants must use the same login host and registry directory. Operations
+run on that host under a file lock; atomic replacement protects concurrent writes.
+
+```bash
+bin/zen register --host my-cluster --peer-id project-a --project experiment-a \
+  --ready 3 accelerator-a accelerator-b --job-id 12345
+bin/zen peers --host my-cluster
+bin/zen --host my-cluster --peer-id project-a --run-sbatch /shared/project/lane.sbatch
+```
+
+The registry defaults to the remote user's `~/.cache/zen-gpu/coordination`.
+Override it with `--registry-root` / `ZEN_REGISTRY_ROOT`. Set `ZEN_PEER_ID` or
+pass `--peer-id` to opt workloads into coordination. Register only ready,
+validated work and its suitable nodes; `--ready 0` withdraws runnable demand.
+Use `--thread-id` to attach a conversation identity and `--note` to share task
+status or handoff information. Refresh registration at least every 180 seconds
+while waiting. Existing jobs
+can be imported with repeated `--job-id`; their ownership cannot be duplicated.
+
+Peers with ready work and zero currently allocated GPUs get first access to
+compatible candidate nodes. Within that group, least-recently granted peers
+come first. Once all waiting peers have capacity or an admission attempt in
+progress, additional GPUs remain unrestricted. There is no fixed GPU cap and
+no preemption of existing jobs. A lack of suitable capacity cannot guarantee
+one simultaneous GPU per peer.
+
+Claims reserve a coordination turn, not a GPU. They expire after 120 seconds
+unless attached to a scheduler-visible job. Binding occurs immediately after
+submission; Slurm controls the real allocation and the in-job gate still checks
+the physical GPU. Pending jobs never count as running GPUs. Stale requests stop
+competing, but their running jobs remain visible. Registry counts are allocation
+observations, not same-PID model execution evidence or accepted results.
+
+Legacy dispatchers may call `can-dispatch` with one candidate node before adding
+a new job. That advisory check does not hold a turn; `--peer-id --run-sbatch` is
+the coordinated submission path that protects concurrent admission. Workstreams
+without integration remain outside fair admission. After handoff the owner
+continues its existing model execution checks and cancellation policy.

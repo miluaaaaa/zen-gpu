@@ -13,6 +13,7 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
 from atomic_submit import submit
 from retry_policy import launch_candidates
+from peer_client import call as peer_call
 
 VERSION = '0.1.0'
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +55,13 @@ def main(argv=None):
     p.add_argument('--remote-root', default=os.environ.get('ZEN_REMOTE_ROOT'), help='absolute job-visible log/work directory')
     p.add_argument('-a', '--again', action='store_true', help='submit short telemetry jobs for scheduler-free GPUs')
     p.add_argument('--run-sbatch', help='job-visible workload script; admit and execute in the same single-GPU allocation')
+    p.add_argument('--peer-id', default=os.environ.get('ZEN_PEER_ID'), help='shared workstream identity for fair admission')
+    p.add_argument('--registry-root', default=os.environ.get('ZEN_REGISTRY_ROOT'), help='shared login-host registry directory')
+    p.add_argument('--project', help='human-readable project/workstream')
+    p.add_argument('--note', help='shared task or progress note; do not include secrets')
+    p.add_argument('--thread-id', help='optional conversation identifier')
+    p.add_argument('--ready', type=int, default=1, help='number of runnable lanes to register')
+    p.add_argument('--job-id', action='append', default=[], help='import an existing own Slurm job; repeatable')
     p.add_argument('--output', help='Slurm output path for --run-sbatch')
     p.add_argument('--export', help='Slurm environment export specification for --run-sbatch')
     p.add_argument('--retry-rounds', type=int, default=1, help='bounded launch rounds; refresh scheduler each round')
@@ -66,6 +74,11 @@ def main(argv=None):
     p.add_argument('--json', action='store_true')
     p.add_argument('--version', action='version', version='zen-gpu ' + VERSION)
     args = p.parse_args(argv)
+    action = args.nodes.pop(0) if args.nodes and args.nodes[0] in ('peers', 'register', 'can-dispatch') else None
+    if action in ('register', 'can-dispatch') and not args.peer_id:
+        p.error('register requires --peer-id')
+    if args.ready < 0:
+        p.error('--ready cannot be negative')
     if not args.local and not args.host:
         p.error('provide --host LOGIN_HOST or --local')
     if any(not NAME.fullmatch(node) for node in args.nodes):
@@ -80,6 +93,28 @@ def main(argv=None):
     def remote(cmd):
         command = ['bash', '-c', cmd] if args.local else ssh + ['--', args.host, cmd]
         return subprocess.check_output(command, text=True, timeout=30)
+    registry_root = args.registry_root
+    if args.peer_id or action:
+        registry_root = registry_root or remote('printf "%s" "$HOME"').strip() + '/.cache/zen-gpu/coordination'
+        if not re.fullmatch(r'/[A-Za-z0-9_./-]+', registry_root):
+            p.error('registry root must be an absolute path without shell metacharacters')
+    if action:
+        request = {'op': action, 'peer_id': args.peer_id, 'project': args.project or args.peer_id,
+                   'ready': args.ready, 'nodes': args.nodes, 'job_ids': args.job_id,
+                   'note': args.note, 'thread_id': args.thread_id}
+        if action == 'can-dispatch':
+            if len(args.nodes) != 1:
+                p.error('can-dispatch requires exactly one candidate node')
+            request['node'] = args.nodes[0]
+        response = peer_call(remote, registry_root, request)
+        if action == 'peers' and not args.json:
+            print('PEER                         ALLOCATED  READY  FRESH  PROJECT')
+            for identity, peer in response['peers'].items():
+                print(f"{identity:28} {peer['running_gpus']:9} {peer['ready']:6} {str(peer['fresh']):6} {peer['project']}")
+            print('Allocated GPUs are scheduler observations; model GPU execution still requires owner verification.')
+        else:
+            print(json.dumps(response, indent=2))
+        return 1 if response['state'] == 'WAITING_PEER_TURN' else 0
     nodes = parse_nodes(remote('scontrol show nodes -o'))
     if args.nodes:
         requested = set(args.nodes)
@@ -102,10 +137,36 @@ def main(argv=None):
             current = parse_nodes(remote('scontrol show nodes -o'))
             return [node for node in current if (not args.nodes or node['node'] in args.nodes)
                     and NAME.fullmatch(node['partition'])]
-        result = launch_candidates(candidates,
-            lambda node: submit(remote, node, args.run_sbatch, remote_root, args.min_free_mib,
-                                args.pending_timeout, args.admission_timeout, args.output, args.export),
-            args.retry_rounds, args.retry_delay)
+        if args.peer_id:
+            peer_call(remote, registry_root, {'op': 'register', 'peer_id': args.peer_id,
+                'project': args.project or args.peer_id, 'ready': args.ready,
+                'nodes': args.nodes, 'job_ids': args.job_id, 'preserve_demand': True,
+                'note': args.note, 'thread_id': args.thread_id})
+        def launch(node):
+            token = None
+            if args.peer_id:
+                claim = peer_call(remote, registry_root, {'op': 'claim', 'peer_id': args.peer_id, 'node': node['node']})
+                if claim['state'] != 'CLAIMED':
+                    return {'state': 'WAITING_PEER_TURN', 'phase': 'WAITING_ALLOCATION',
+                            'node': node['node'], 'priority_peer': claim['priority_peer']}
+                token = claim['token']
+            def bind(job):
+                peer_call(remote, registry_root, {'op': 'bind', 'peer_id': args.peer_id,
+                                                 'token': token, 'job_id': job})
+            try:
+                attempt = submit(remote, node, args.run_sbatch, remote_root, args.min_free_mib,
+                                 args.pending_timeout, args.admission_timeout, args.output, args.export,
+                                 bind if token else None)
+            except BaseException:
+                if token:
+                    peer_call(remote, registry_root, {'op': 'release', 'peer_id': args.peer_id, 'token': token})
+                raise
+            if token:
+                peer_call(remote, registry_root, {'op': 'handoff' if attempt['phase'] == 'HANDED_OFF' else 'release',
+                                                 'peer_id': args.peer_id, 'token': token})
+                attempt['peer_id'] = args.peer_id
+            return attempt
+        result = launch_candidates(candidates, launch, args.retry_rounds, args.retry_delay)
         print(json.dumps({'version': VERSION, **result}))
         return 0 if result['state'] == 'ADMITTED_NOT_GPU_VERIFIED' else 1
     report = []

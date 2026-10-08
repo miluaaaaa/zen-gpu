@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 
 
-def submit(remote, node, script, root, minimum, timeout, gate_timeout=60, output=None, export=None):
+def submit(remote, node, script, root, minimum, timeout, gate_timeout=60, output=None, export=None, on_submission=None):
     # Copy only directives; execute the original script so its relative paths and
     # environment remain the responsibility of the existing workload launcher.
     source = remote('cat -- ' + shlex.quote(script))
@@ -51,6 +51,8 @@ def submit(remote, node, script, root, minimum, timeout, gate_timeout=60, output
     gate_since = None
     handed_off = False
     try:
+        if on_submission:
+            on_submission(job)
         while True:
             raw = remote('if test -f ' + shlex.quote(evidence) + '; then cat ' + shlex.quote(evidence) + '; fi')
             if raw.strip():

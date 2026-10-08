@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add a shared login-host peer registry, live scheduler reconciliation, locked
+  admission claims, stale-heartbeat expiry and first-GPU priority without caps.
+- Expose register, peers and advisory can-dispatch commands; opt workloads into
+  coordinated submission with --peer-id.
+
 - Add progress-based retry phases, configurable bounded rounds, scheduler refresh
   between rounds and candidate-only backoff; stop retrying after workload handoff.
 
