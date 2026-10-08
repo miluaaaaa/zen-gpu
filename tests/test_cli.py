@@ -36,6 +36,23 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result['clean_at_probe'], 6)
             self.assertEqual(len(result['clean_uuids']), 6)
 
+    def test_handoff_registry_failure_does_not_hide_running_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            def registry(remote, root, request):
+                if request['op'] == 'claim': return {'state': 'CLAIMED', 'token': 't'}
+                if request['op'] == 'handoff': raise OSError('registry temporarily unavailable')
+                return {'state': 'OK'}
+            output = io.StringIO()
+            with patch.dict(os.environ, {'ZEN_CACHE_DIR': tmp}), patch('subprocess.check_output', return_value=SNAPSHOT), contextlib.redirect_stdout(output):
+                with patch.dict(CLI['main'].__globals__, peer_call=registry,
+                     submit=lambda *args: {'state': 'ADMITTED_NOT_GPU_VERIFIED', 'phase': 'HANDED_OFF', 'job_id': '123'}):
+                    rc = CLI['main'](['--local', '--peer-id', 'a', '--registry-root', '/shared/registry',
+                                      '--run-sbatch', '/shared/lane', '--remote-root', '/shared/zen'])
+            result = json.loads(output.getvalue())
+            self.assertEqual(rc, 0)
+            self.assertEqual(result['attempts'][0]['job_id'], '123')
+            self.assertIn('coordination_warning', result['attempts'][0])
+
     def test_scheduler_free_without_telemetry_is_unverified(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = io.StringIO()

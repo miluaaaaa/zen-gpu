@@ -162,8 +162,15 @@ def main(argv=None):
                     peer_call(remote, registry_root, {'op': 'release', 'peer_id': args.peer_id, 'token': token})
                 raise
             if token:
-                peer_call(remote, registry_root, {'op': 'handoff' if attempt['phase'] == 'HANDED_OFF' else 'release',
-                                                 'peer_id': args.peer_id, 'token': token})
+                try:
+                    peer_call(remote, registry_root, {'op': 'handoff' if attempt['phase'] == 'HANDED_OFF' else 'release',
+                                                     'peer_id': args.peer_id, 'token': token})
+                except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                    if attempt['phase'] != 'HANDED_OFF':
+                        raise
+                    # The admitted job already exists and must be handed to its
+                    # owner even if the final registry acknowledgement fails.
+                    attempt['coordination_warning'] = str(exc)
                 attempt['peer_id'] = args.peer_id
             return attempt
         result = launch_candidates(candidates, launch, args.retry_rounds, args.retry_delay)
