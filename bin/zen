@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Allocation-aware Slurm GPU discovery, with bounded per-card telemetry probes."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+import time
+
+VERSION = '0.1.0'
+ROOT = Path(__file__).resolve().parents[1]
+NAME = re.compile(r'^[A-Za-z0-9_.-]+$')
+
+
+def parse_nodes(text):
+    """Parse Slurm one-line node records, distinguishing CPUs from GPU TRES."""
+    nodes = []
+    for line in text.splitlines():
+        fields = dict(re.findall(r'(\w+)=([^\s]+)', line))
+        if 'NodeName' not in fields:
+            continue
+        def count(key):
+            match = re.search(r'(?:^|,)gres/gpu=(\d+)(?:,|$)', fields.get(key, ''))
+            return int(match.group(1)) if match else 0
+        total, allocated = count('CfgTRES'), count('AllocTRES')
+        if not total:
+            continue
+        nodes.append({'node': fields['NodeName'], 'partition': fields.get('Partitions', '').split(',')[0],
+                      'state': fields.get('State', 'UNKNOWN'), 'total': total, 'allocated': allocated,
+                      'scheduler_free': max(0, total - allocated)})
+    return nodes
+
+
+def read_state(path):
+    if not path.exists():
+        return {}
+    return dict(line.split('=', 1) for line in path.read_text().splitlines() if '=' in line)
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('nodes', nargs='*', help='optional exact node names; otherwise discover all GPU nodes')
+    route = p.add_mutually_exclusive_group(required=False)
+    route.add_argument('--host', default=os.environ.get('ZEN_HOST'), help='SSH login host / ssh-config alias')
+    route.add_argument('--local', action='store_true', help='run on the Slurm login host')
+    p.add_argument('--ssh-key', default=os.environ.get('ZEN_SSH_KEY'))
+    p.add_argument('--remote-root', default=os.environ.get('ZEN_REMOTE_ROOT'), help='absolute job-visible log/work directory')
+    p.add_argument('-a', '--again', action='store_true', help='submit short telemetry jobs for scheduler-free GPUs')
+    p.add_argument('--probe-only', action='store_true', help='compatibility flag; Zen never launches model workloads')
+    p.add_argument('--min-free-mib', type=int, default=30000)
+    p.add_argument('--pending-timeout', type=int, default=15)
+    p.add_argument('--max-age', type=int, default=120)
+    p.add_argument('--json', action='store_true')
+    p.add_argument('--version', action='version', version='zen-gpu ' + VERSION)
+    args = p.parse_args(argv)
+    if not args.local and not args.host:
+        p.error('provide --host LOGIN_HOST or --local')
+    if any(not NAME.fullmatch(node) for node in args.nodes):
+        p.error('node names may contain letters, numbers, underscores, dots and hyphens')
+    if args.min_free_mib < 0 or args.pending_timeout < 1 or args.max_age < 1:
+        p.error('invalid memory threshold or timeout')
+    ssh = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10']
+    if args.ssh_key:
+        ssh += ['-i', args.ssh_key]
+    def remote(cmd):
+        command = ['bash', '-c', cmd] if args.local else ssh + ['--', args.host, cmd]
+        return subprocess.check_output(command, text=True, timeout=30)
+    nodes = parse_nodes(remote('scontrol show nodes -o'))
+    if args.nodes:
+        requested = set(args.nodes)
+        nodes = [node for node in nodes if node['node'] in requested]
+        missing = requested - {node['node'] for node in nodes}
+        if missing:
+            p.error('unknown/non-GPU nodes: ' + ', '.join(sorted(missing)))
+    cache = Path(os.environ.get('ZEN_CACHE_DIR', str(Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache')) / 'zen-gpu')))
+    state_dir = cache / 'state'
+    state_dir.mkdir(parents=True, exist_ok=True)
+    remote_root = args.remote_root
+    if args.again:
+        if not remote_root:
+            remote_home = remote('printf "%s" "$HOME"').strip()
+            remote_root = remote_home + '/.cache/zen-gpu'
+        if not re.fullmatch(r'/[A-Za-z0-9_./-]+', remote_root or ''):
+            p.error('--remote-root must be an absolute path without spaces or shell metacharacters')
+    report = []
+    for node in nodes:
+        name = node['node']
+        unavailable = any(word in node['state'] for word in ['DOWN', 'DRAIN', 'NOT_RESPOND', 'FAIL', 'MAINT'])
+        state_path = state_dir / (name + '.env')
+        state = read_state(state_path)
+        probe_rc = None
+        if args.again and node['scheduler_free'] and not unavailable:
+            env = os.environ.copy()
+            env.update(ZEN_HOST=args.host or '', ZEN_SSH_KEY=args.ssh_key or '', ZEN_LOCAL='1' if args.local else '0',
+                       ZEN_REMOTE_ROOT=remote_root, ZEN_PARTITION=node['partition'], ZEN_CACHE_DIR=str(cache),
+                       ZEN_STATE_DIR=str(state_dir), ZEN_PROBE_GPUS=str(node['scheduler_free']),
+                       ZEN_PROBE_PENDING_TIMEOUT_SECONDS=str(args.pending_timeout), ZEN_READY_MIN_FREE_MIB=str(args.min_free_mib))
+            # Scripts emit no credentials; keep diagnostics separate from JSON stdout.
+            result = subprocess.run(['bash', str(ROOT / 'lib/probe_via_job.sh'), name], env=env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            log = cache / (name + '-last-probe.log')
+            log.write_text(result.stdout)
+            probe_rc = result.returncode
+            state = read_state(state_path)
+            node['probe_log'] = str(log)
+        measured = int(state.get('PROBED_AT', '0'))
+        age = int(time.time()) - measured
+        clean = int(state.get('GPU_READY_COUNT', '0'))
+        probed = int(state.get('GPU_PROBED_COUNT', '0'))
+        uuids = [x for x in state.get('GPU_READY_UUIDS', '').split(',') if x]
+        fresh = measured > 0 and 0 <= age <= args.max_age
+        valid = fresh and state.get('FINAL_STATE') == 'COMPLETED' and probe_rc in (None, 0)
+        if unavailable:
+            status = 'unavailable'
+        elif not node['scheduler_free']:
+            status = 'scheduler_full'
+        elif not valid:
+            status = 'unverified'
+        elif clean and len(uuids) == clean:
+            status = 'ready' if state.get('OCCUPIED') == 'no' else 'partial_ready'
+        elif probed < node['scheduler_free'] or state.get('OCCUPIED') == 'unknown':
+            status = 'unverified'
+        else:
+            status = 'busy'
+        node.update(status=status, clean_at_probe=clean if valid else None,
+                    probed=probed if valid else None, clean_uuids=uuids if valid else [],
+                    probe_age_seconds=age if measured else None,
+                    probe_job_id=state.get('JOB_ID') if measured else None)
+        report.append(node)
+    if args.json:
+        print(json.dumps({'version': VERSION, 'nodes': report}, indent=2))
+    else:
+        print('NODE                 STATUS           SCHED-FREE  PROBED  CLEAN')
+        for node in report:
+            print(f"{node['node']:20} {node['status']:16} {node['scheduler_free']:10} {str(node['probed']):7} {str(node['clean_at_probe']):5}")
+            if node['clean_uuids']:
+                print('  clean UUIDs at probe: ' + ','.join(node['clean_uuids']))
+        print('Telemetry jobs release their allocation. Recheck selected UUIDs inside the workload allocation.')
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        print('zen: ' + str(exc), file=sys.stderr)
+        sys.exit(1)
