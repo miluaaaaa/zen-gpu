@@ -11,9 +11,9 @@ def check(env, query, minimum):
     allocated = env.get('SLURM_JOB_GPUS', '').split(',')
     if len(visible) != 1 or not visible[0] or len(allocated) != 1 or not allocated[0]:
         raise ValueError('exactly one allocated and visible GPU is required')
-    # SLURM_JOB_GPUS uses global GPU IDs; CUDA indices may be remapped by cgroups.
-    card = allocated[0]
-    raw = query(['nvidia-smi', '-i', card,
+    # NVML indices can be remapped by Slurm device cgroups. Require exactly
+    # one allocation-scoped NVML UUID instead of querying a global ordinal.
+    raw = query(['nvidia-smi',
                  '--query-gpu=uuid,memory.used,memory.total,utilization.gpu',
                  '--format=csv,noheader,nounits'])
     rows = [line for line in raw.splitlines() if line.strip()]
@@ -22,7 +22,7 @@ def check(env, query, minimum):
     uuid, used, total, util = [part.strip() for part in rows[0].split(',')]
     if not uuid.startswith('GPU-'):
         raise ValueError('unsupported GPU identity')
-    processes = query(['nvidia-smi', '-i', card,
+    processes = query(['nvidia-smi',
                        '--query-compute-apps=gpu_uuid,pid', '--format=csv,noheader,nounits'])
     for line in processes.splitlines():
         if not line.strip() or 'No running processes found' in line:

@@ -17,7 +17,12 @@ class AdmissionTests(unittest.TestCase):
             return '' if '--query-compute-apps=gpu_uuid,pid' in args else 'GPU-a, 0, 80000, 0\n'
         uuid = check({'CUDA_VISIBLE_DEVICES': '0', 'SLURM_JOB_GPUS': '5'}, query, 30000)
         self.assertEqual(uuid, 'GPU-a')
-        self.assertTrue(all(args[2] == '5' for args in calls))
+        self.assertTrue(all('-i' not in args for args in calls))
+
+    def test_unscoped_multi_card_visibility_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, 'one card'):
+            check({'CUDA_VISIBLE_DEVICES': '0', 'SLURM_JOB_GPUS': '5'},
+                  lambda args: 'GPU-a, 0, 80000, 0\nGPU-b, 0, 80000, 0\n', 0)
 
     def test_rejects_pid_even_with_spare_memory(self):
         def query(args):
