@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add durable directed/broadcast peer mailboxes, idempotent sends, linked replies,
+  notification counts, explicit read timestamps and recipient handling receipts.
+
 - Add a shared login-host peer registry, live scheduler reconciliation, locked
   admission claims, stale-heartbeat expiry and first-GPU priority without caps.
 - Expose register, peers and advisory can-dispatch commands; opt workloads into

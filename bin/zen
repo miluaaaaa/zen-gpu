@@ -58,6 +58,14 @@ def main(argv=None):
     p.add_argument('--peer-id', default=os.environ.get('ZEN_PEER_ID'), help='shared workstream identity for fair admission')
     p.add_argument('--registry-root', default=os.environ.get('ZEN_REGISTRY_ROOT'), help='shared login-host registry directory')
     p.add_argument('--project', help='human-readable project/workstream')
+    p.add_argument('--to', help='recipient peer ID or all')
+    p.add_argument('--text', help='message body or handling receipt')
+    p.add_argument('--message-file', help='UTF-8 message body file; avoids shell quoting')
+    p.add_argument('--message-id', help='message to acknowledge')
+    p.add_argument('--request-id', help='idempotency key for retrying send')
+    p.add_argument('--reply-to', help='original message ID')
+    p.add_argument('--mark-read', action='store_true', help='explicitly mark returned inbox messages read')
+    p.add_argument('--include-acked', action='store_true')
     p.add_argument('--note', help='shared task or progress note; do not include secrets')
     p.add_argument('--thread-id', help='optional conversation identifier')
     p.add_argument('--ready', type=int, default=1, help='number of runnable lanes to register')
@@ -74,8 +82,8 @@ def main(argv=None):
     p.add_argument('--json', action='store_true')
     p.add_argument('--version', action='version', version='zen-gpu ' + VERSION)
     args = p.parse_args(argv)
-    action = args.nodes.pop(0) if args.nodes and args.nodes[0] in ('peers', 'register', 'can-dispatch') else None
-    if action in ('register', 'can-dispatch') and not args.peer_id:
+    action = args.nodes.pop(0) if args.nodes and args.nodes[0] in ('peers', 'register', 'can-dispatch', 'send', 'inbox', 'outbox', 'ack', 'notifications') else None
+    if action in ('register', 'can-dispatch', 'send', 'inbox', 'outbox', 'ack') and not args.peer_id:
         p.error('register requires --peer-id')
     if args.ready < 0:
         p.error('--ready cannot be negative')
@@ -102,6 +110,13 @@ def main(argv=None):
         request = {'op': action, 'peer_id': args.peer_id, 'project': args.project or args.peer_id,
                    'ready': args.ready, 'nodes': args.nodes, 'job_ids': args.job_id,
                    'note': args.note, 'thread_id': args.thread_id}
+        if action in ('send', 'ack'):
+            if args.text is not None and args.message_file:
+                p.error('use --text or --message-file, not both')
+            text = Path(args.message_file).read_text() if args.message_file else args.text
+            request.update(to=args.to, text=text, receipt=text, message_id=args.message_id,
+                           request_id=args.request_id, reply_to=args.reply_to)
+        request.update(mark_read=args.mark_read, include_acked=args.include_acked)
         if action == 'can-dispatch':
             if len(args.nodes) != 1:
                 p.error('can-dispatch requires exactly one candidate node')
