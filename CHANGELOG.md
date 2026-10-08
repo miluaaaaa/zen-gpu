@@ -33,3 +33,7 @@
   whole-node workload gates separate from partial-card observations.
 - Provide a portable CLI, generic Slurm node/partition discovery, configurable
   SSH and storage locations, regression tests, and CI.
+# Agent Mail integration
+
+- Add optional `zen-mail` client for authenticated MCP Agent Mail discussions,
+  explicit receipts and unread notification counts; GPU admission stays in Zen.
