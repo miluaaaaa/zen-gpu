@@ -10,6 +10,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
+from atomic_submit import submit
+
 VERSION = '0.1.0'
 ROOT = Path(__file__).resolve().parents[1]
 NAME = re.compile(r'^[A-Za-z0-9_.-]+$')
@@ -49,7 +52,11 @@ def main(argv=None):
     p.add_argument('--ssh-key', default=os.environ.get('ZEN_SSH_KEY'))
     p.add_argument('--remote-root', default=os.environ.get('ZEN_REMOTE_ROOT'), help='absolute job-visible log/work directory')
     p.add_argument('-a', '--again', action='store_true', help='submit short telemetry jobs for scheduler-free GPUs')
-    p.add_argument('--probe-only', action='store_true', help='compatibility flag; Zen never launches model workloads')
+    p.add_argument('--run-sbatch', help='job-visible workload script; admit and execute in the same single-GPU allocation')
+    p.add_argument('--output', help='Slurm output path for --run-sbatch')
+    p.add_argument('--export', help='Slurm environment export specification for --run-sbatch')
+    p.add_argument('--admission-timeout', type=int, default=60)
+    p.add_argument('--probe-only', action='store_true', help='telemetry-only compatibility flag')
     p.add_argument('--min-free-mib', type=int, default=30000)
     p.add_argument('--pending-timeout', type=int, default=15)
     p.add_argument('--max-age', type=int, default=120)
@@ -60,7 +67,9 @@ def main(argv=None):
         p.error('provide --host LOGIN_HOST or --local')
     if any(not NAME.fullmatch(node) for node in args.nodes):
         p.error('node names may contain letters, numbers, underscores, dots and hyphens')
-    if args.min_free_mib < 0 or args.pending_timeout < 1 or args.max_age < 1:
+    if args.run_sbatch and (args.again or args.probe_only):
+        p.error('--run-sbatch cannot be combined with telemetry-only probing')
+    if args.min_free_mib < 0 or args.pending_timeout < 1 or args.max_age < 1 or args.admission_timeout < 1:
         p.error('invalid memory threshold or timeout')
     ssh = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10']
     if args.ssh_key:
@@ -79,12 +88,27 @@ def main(argv=None):
     state_dir = cache / 'state'
     state_dir.mkdir(parents=True, exist_ok=True)
     remote_root = args.remote_root
-    if args.again:
+    if args.again or args.run_sbatch:
         if not remote_root:
             remote_home = remote('printf "%s" "$HOME"').strip()
             remote_root = remote_home + '/.cache/zen-gpu'
         if not re.fullmatch(r'/[A-Za-z0-9_./-]+', remote_root or ''):
             p.error('--remote-root must be an absolute path without spaces or shell metacharacters')
+    if args.run_sbatch:
+        attempts = []
+        for node in nodes:
+            if not node['partition'] or not NAME.fullmatch(node['partition']):
+                continue
+            if not node['scheduler_free'] or any(word in node['state'] for word in ['DOWN', 'DRAIN', 'NOT_RESPOND', 'FAIL', 'MAINT']):
+                continue
+            result = submit(remote, node, args.run_sbatch, remote_root, args.min_free_mib,
+                            args.pending_timeout, args.admission_timeout, args.output, args.export)
+            attempts.append(result)
+            if result['state'] == 'ADMITTED_NOT_GPU_VERIFIED':
+                print(json.dumps({'version': VERSION, 'state': result['state'], 'attempts': attempts}))
+                return 0
+        print(json.dumps({'version': VERSION, 'state': 'NO_ADMITTED_GPU', 'attempts': attempts}))
+        return 1
     report = []
     for node in nodes:
         name = node['node']

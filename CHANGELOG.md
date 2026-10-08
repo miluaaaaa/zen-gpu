@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Add `--run-sbatch`: check the allocated single GPU and start the existing
+  workload in the same Slurm job, eliminating the release/resubmit race.
+- Fail closed on occupied cards or unavailable admission evidence, distinguish
+  pending allocation timeouts from physical occupancy, and cancel failed attempts.
+- Preserve workload resource directives and keep model execution verification
+  separate from GPU admission.
+
 ## 0.1.0 — 2026-10-08
 
 - Probe all currently scheduler-free cards instead of assuming a two-card sample

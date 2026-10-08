@@ -86,9 +86,8 @@ called busy. This version does not automatically split such a probe into smaller
 allocations. Environment variables `ZEN_HOST`, `ZEN_SSH_KEY`, `ZEN_REMOTE_ROOT`,
 and `ZEN_CACHE_DIR` provide defaults for the corresponding locations.
 
-Telemetry is a timestamped snapshot. Jobs release their allocation after probing;
-Zen does not reserve the clean cards, launch workloads, or guarantee that a later
-Slurm allocation will select the same UUIDs. Consumers must inspect the actual
+Telemetry-only mode is a timestamped snapshot. Jobs release their allocation after
+probing and do not guarantee that a later Slurm allocation selects the same UUIDs. Consumers must inspect the actual
 allocated UUIDs and confirm exclusive GPU execution inside their workload job.
 Cached clean UUIDs are historical measurements, not current reservations.
 
@@ -102,3 +101,41 @@ bash -n lib/probe_via_job.sh lib/node_state_lib.sh
 Regression fixtures cover incomplete node visibility, mixed busy/clean GPUs,
 PID-based exclusivity, telemetry failures, expired evidence, and automatic
 full-free-set probe sizing. GitHub Actions runs these checks on pushes and PRs.
+
+## Start a lane without releasing its GPU
+
+```bash
+bin/zen --host my-cluster accelerator-a accelerator-b \
+  --run-sbatch /shared/project/lane.sbatch \
+  --remote-root /shared/my-user/zen-launch --pending-timeout 15
+```
+
+`--run-sbatch` submits a single-GPU workload allocation directly, checks the
+allocated physical GPU inside that job, and executes the existing script in the
+**same job** when admission passes. There is no telemetry-job-to-workload-job
+release window. Cached clean UUIDs do not authorize this launch. Only one lane
+is launched per invocation; callers can invoke it concurrently for disjoint lanes.
+
+The script must be job-visible Bash. Its `#SBATCH` resource directives are copied
+into the wrapper; Zen overrides node, partition, node/task counts and GPU binding
+for one exclusive GPU. Use scripts intended for one GPU, without conflicting
+`--gpus*` or heterogeneous-job directives. `--output` and `--export` forward Slurm
+log and environment settings. The existing working directory and exported
+environment follow normal `sbatch` semantics.
+
+The admission gate requires exactly one visible and allocated GPU, readable GPU
+and process telemetry, no existing compute PID, zero sampled utilization, and
+enough free memory. Missing telemetry or an occupied card stops the wrapper
+before the workload. MIG and clusters without `SLURM_JOB_GPUS` fail closed.
+
+The CLI returns JSON with `ADMITTED_NOT_GPU_VERIFIED` after admission, leaving
+the running workload allocated. This status is **not a successful model result**:
+the workload must still prove its actual model PID has model-sized GPU memory
+and nonzero compute during a forward pass, cancel invalid runs, and verify its
+outputs. The caller owns monitoring and cancellation after handoff.
+
+An attempt that remains pending is cancelled after `--pending-timeout`, recorded
+as `PENDING_TIMEOUT`, and the next candidate is tried. Missing gate evidence is
+`ADMISSION_FAILED` or `ADMISSION_TIMEOUT` (default 60 seconds). Rejected or
+interrupted attempts cancel only their own job. A lack of scheduler admission is
+never reported as proof that all physical GPUs are busy.
