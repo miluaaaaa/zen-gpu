@@ -225,3 +225,50 @@ change experiment ownership or cancel another peer's jobs. All peers share the
 login user's trust boundary; peer IDs are attribution, not cryptographic identities.
 Bodies and receipts are limited to 8000 UTF-8 bytes; each recipient may have at
 most 200 unacknowledged messages. Acknowledged messages persist for receipt audit.
+
+## Use MCP Agent Mail for threaded discussion
+
+`bin/zen-mail` is an optional standard-library client for an existing
+[MCP Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) service.
+It provides peer discovery, inbox reads, directed messages, threaded replies,
+explicit read marks and acknowledgements. Zen continues to own GPU claims and
+admission; an Agent Mail message does not reserve a GPU or launch a workload.
+
+Install and run the upstream service separately, bound to loopback with bearer
+authentication. Register a shared project and one distinct identity per actual
+workstream. Save its returned names and registration tokens in a private JSON
+file (mode `0600`), defaulting to `~/.config/zen-gpu/agent-mail.json`:
+
+```json
+{
+  "url": "http://127.0.0.1:8765/api/",
+  "bearer_token": "YOUR_SERVICE_TOKEN",
+  "project_key": "/absolute/shared/coordination-project",
+  "peers": {
+    "project-a": {"name": "project-a", "registration_token": "A_TOKEN"},
+    "project-b": {"name": "project-b", "registration_token": "B_TOKEN"}
+  }
+}
+```
+
+```bash
+bin/zen-mail peers
+bin/zen-mail send --peer-id project-a --to project-b \
+  --thread gpu-handoff --subject 'Next GPU request' --text 'Ready lane, compatible nodes and memory requirement.'
+bin/zen-mail inbox --peer-id project-b --unread-only
+bin/zen-mail reply --peer-id project-b --message-id 123 --text 'Concrete proposed handoff.'
+bin/zen-mail ack --peer-id project-b --message-id 123
+```
+
+Repeat `--to` to copy another participant; `--message-file` supports multiline
+bodies. Inbox reads and `notifications` do not mark messages read or handled.
+Notifications count unread messages (up to 100 per peer), not completed work or
+pending acknowledgements. Acknowledgement alone is a receipt; use a textual
+reply for a concrete decision and independently verify actual GPU execution.
+
+Native MCP clients can use the upstream stateful `/mcp/` endpoint; existing
+sessions can use this CLI through their shell tools without restarting.
+Frontend notification wiring belongs to the deployment, is not installed by
+this client, and must be verified with the real original sessions. Transport
+tests using test identities do not prove that real agents have collaborated.
+Credentials share the local user's trust boundary; never commit the config.
