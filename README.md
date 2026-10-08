@@ -86,9 +86,8 @@ called busy. This version does not automatically split such a probe into smaller
 allocations. Environment variables `ZEN_HOST`, `ZEN_SSH_KEY`, `ZEN_REMOTE_ROOT`,
 and `ZEN_CACHE_DIR` provide defaults for the corresponding locations.
 
-Telemetry is a timestamped snapshot. Jobs release their allocation after probing;
-Zen does not reserve the clean cards, launch workloads, or guarantee that a later
-Slurm allocation will select the same UUIDs. Consumers must inspect the actual
+Telemetry-only mode is a timestamped snapshot. Jobs release their allocation after
+probing and do not guarantee that a later Slurm allocation selects the same UUIDs. Consumers must inspect the actual
 allocated UUIDs and confirm exclusive GPU execution inside their workload job.
 Cached clean UUIDs are historical measurements, not current reservations.
 
@@ -102,3 +101,99 @@ bash -n lib/probe_via_job.sh lib/node_state_lib.sh
 Regression fixtures cover incomplete node visibility, mixed busy/clean GPUs,
 PID-based exclusivity, telemetry failures, expired evidence, and automatic
 full-free-set probe sizing. GitHub Actions runs these checks on pushes and PRs.
+
+## Start a lane without releasing its GPU
+
+```bash
+bin/zen --host my-cluster accelerator-a accelerator-b \
+  --run-sbatch /shared/project/lane.sbatch \
+  --remote-root /shared/my-user/zen-launch --pending-timeout 15
+```
+
+`--run-sbatch` submits a single-GPU workload allocation directly, checks the
+allocated physical GPU inside that job, and executes the existing script in the
+**same job** when admission passes. There is no telemetry-job-to-workload-job
+release window. Cached clean UUIDs do not authorize this launch. Only one lane
+is launched per invocation; callers can invoke it concurrently for disjoint lanes.
+
+The script must be job-visible Bash. Its `#SBATCH` resource directives are copied
+into the wrapper; Zen overrides node, partition, node/task counts and GPU binding
+for one exclusive GPU. Use scripts intended for one GPU, without conflicting
+`--gpus*` or heterogeneous-job directives. `--output` and `--export` forward Slurm
+log and environment settings. The existing working directory and exported
+environment follow normal `sbatch` semantics.
+
+The admission gate requires exactly one visible and allocated GPU, readable GPU
+and process telemetry, no existing compute PID, zero sampled utilization, and
+enough free memory. Missing telemetry or an occupied card stops the wrapper
+before the workload. MIG and clusters without `SLURM_JOB_GPUS` fail closed.
+
+The CLI returns JSON with `ADMITTED_NOT_GPU_VERIFIED` after admission, leaving
+the running workload allocated. This status is **not a successful model result**:
+the workload must still prove its actual model PID has model-sized GPU memory
+and nonzero compute during a forward pass, cancel invalid runs, and verify its
+outputs. The caller owns monitoring and cancellation after handoff.
+
+An attempt that remains pending is cancelled after `--pending-timeout`, recorded
+as `PENDING_TIMEOUT`, and the next candidate is tried. Missing gate evidence is
+`ADMISSION_FAILED` or `ADMISSION_TIMEOUT` (default 60 seconds). Rejected or
+interrupted attempts cancel only their own job. A lack of scheduler admission is
+never reported as proof that all physical GPUs are busy.
+
+### Retry by progress
+
+Use `--retry-rounds 3 --retry-delay 10` to refresh candidate nodes and make up to
+three bounded launch rounds. Defaults are one round and a ten-second delay.
+Each attempt records its phase, round, raw error and retry policy:
+
+| Phase | Retry behavior |
+| --- | --- |
+| `WAITING_ALLOCATION` | Try the next candidate immediately; no occupancy inference. |
+| `CHECKING_ALLOCATION` | Release this attempt and briefly back off this candidate, while trying others. |
+| `HANDED_OFF` | Stop retrying; the workload owner monitors model execution. |
+
+Policy uses progress fields rather than matching error messages. Handoff means
+admission passed; it does not prove model startup or GPU execution. Unknown
+phases stop automatic retries. Transport/configuration exceptions also stop the
+invocation for diagnosis. No retry automatically restarts an admitted workload.
+
+## Coordinate independent workstreams
+
+All participants must use the same login host and registry directory. Operations
+run on that host under a file lock; atomic replacement protects concurrent writes.
+
+```bash
+bin/zen register --host my-cluster --peer-id project-a --project experiment-a \
+  --ready 3 accelerator-a accelerator-b --job-id 12345
+bin/zen peers --host my-cluster
+bin/zen --host my-cluster --peer-id project-a --run-sbatch /shared/project/lane.sbatch
+```
+
+The registry defaults to the remote user's `~/.cache/zen-gpu/coordination`.
+Override it with `--registry-root` / `ZEN_REGISTRY_ROOT`. Set `ZEN_PEER_ID` or
+pass `--peer-id` to opt workloads into coordination. Register only ready,
+validated work and its suitable nodes; `--ready 0` withdraws runnable demand.
+Use `--thread-id` to attach a conversation identity and `--note` to share task
+status or handoff information. Refresh registration at least every 180 seconds
+while waiting. Existing jobs
+can be imported with repeated `--job-id`; their ownership cannot be duplicated.
+
+Peers with ready work and zero currently allocated GPUs get first access to
+compatible candidate nodes. Within that group, least-recently granted peers
+come first. Once all waiting peers have capacity or an admission attempt in
+progress, additional GPUs remain unrestricted. There is no fixed GPU cap and
+no preemption of existing jobs. A lack of suitable capacity cannot guarantee
+one simultaneous GPU per peer.
+
+Claims reserve a coordination turn, not a GPU. They expire after 120 seconds
+unless attached to a scheduler-visible job. Binding occurs immediately after
+submission; Slurm controls the real allocation and the in-job gate still checks
+the physical GPU. Pending jobs never count as running GPUs. Stale requests stop
+competing, but their running jobs remain visible. Registry counts are allocation
+observations, not same-PID model execution evidence or accepted results.
+
+Legacy dispatchers may call `can-dispatch` with one candidate node before adding
+a new job. That advisory check does not hold a turn; `--peer-id --run-sbatch` is
+the coordinated submission path that protects concurrent admission. Workstreams
+without integration remain outside fair admission. After handoff the owner
+continues its existing model execution checks and cancellation policy.

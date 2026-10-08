@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- Add a shared login-host peer registry, live scheduler reconciliation, locked
+  admission claims, stale-heartbeat expiry and first-GPU priority without caps.
+- Expose register, peers and advisory can-dispatch commands; opt workloads into
+  coordinated submission with --peer-id.
+
+- Add progress-based retry phases, configurable bounded rounds, scheduler refresh
+  between rounds and candidate-only backoff; stop retrying after workload handoff.
+
+- Add `--run-sbatch`: check the allocated single GPU and start the existing
+  workload in the same Slurm job, eliminating the release/resubmit race.
+- Fail closed on occupied cards or unavailable admission evidence, distinguish
+  pending allocation timeouts from physical occupancy, and cancel failed attempts.
+- Preserve workload resource directives and keep model execution verification
+  separate from GPU admission.
+
 ## 0.1.0 — 2026-10-08
 
 - Probe all currently scheduler-free cards instead of assuming a two-card sample
