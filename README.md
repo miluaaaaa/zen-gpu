@@ -139,3 +139,20 @@ as `PENDING_TIMEOUT`, and the next candidate is tried. Missing gate evidence is
 `ADMISSION_FAILED` or `ADMISSION_TIMEOUT` (default 60 seconds). Rejected or
 interrupted attempts cancel only their own job. A lack of scheduler admission is
 never reported as proof that all physical GPUs are busy.
+
+### Retry by progress
+
+Use `--retry-rounds 3 --retry-delay 10` to refresh candidate nodes and make up to
+three bounded launch rounds. Defaults are one round and a ten-second delay.
+Each attempt records its phase, round, raw error and retry policy:
+
+| Phase | Retry behavior |
+| --- | --- |
+| `WAITING_ALLOCATION` | Try the next candidate immediately; no occupancy inference. |
+| `CHECKING_ALLOCATION` | Release this attempt and briefly back off this candidate, while trying others. |
+| `HANDED_OFF` | Stop retrying; the workload owner monitors model execution. |
+
+Policy uses progress fields rather than matching error messages. Handoff means
+admission passed; it does not prove model startup or GPU execution. Unknown
+phases stop automatic retries. Transport/configuration exceptions also stop the
+invocation for diagnosis. No retry automatically restarts an admitted workload.

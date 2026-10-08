@@ -12,6 +12,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
 from atomic_submit import submit
+from retry_policy import launch_candidates
 
 VERSION = '0.1.0'
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +56,8 @@ def main(argv=None):
     p.add_argument('--run-sbatch', help='job-visible workload script; admit and execute in the same single-GPU allocation')
     p.add_argument('--output', help='Slurm output path for --run-sbatch')
     p.add_argument('--export', help='Slurm environment export specification for --run-sbatch')
+    p.add_argument('--retry-rounds', type=int, default=1, help='bounded launch rounds; refresh scheduler each round')
+    p.add_argument('--retry-delay', type=int, default=10, help='seconds between rounds and after failed admission')
     p.add_argument('--admission-timeout', type=int, default=60)
     p.add_argument('--probe-only', action='store_true', help='telemetry-only compatibility flag')
     p.add_argument('--min-free-mib', type=int, default=30000)
@@ -69,7 +72,7 @@ def main(argv=None):
         p.error('node names may contain letters, numbers, underscores, dots and hyphens')
     if args.run_sbatch and (args.again or args.probe_only):
         p.error('--run-sbatch cannot be combined with telemetry-only probing')
-    if args.min_free_mib < 0 or args.pending_timeout < 1 or args.max_age < 1 or args.admission_timeout < 1:
+    if args.min_free_mib < 0 or args.pending_timeout < 1 or args.max_age < 1 or args.admission_timeout < 1 or args.retry_rounds < 1 or args.retry_delay < 1:
         p.error('invalid memory threshold or timeout')
     ssh = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10']
     if args.ssh_key:
@@ -95,20 +98,16 @@ def main(argv=None):
         if not re.fullmatch(r'/[A-Za-z0-9_./-]+', remote_root or ''):
             p.error('--remote-root must be an absolute path without spaces or shell metacharacters')
     if args.run_sbatch:
-        attempts = []
-        for node in nodes:
-            if not node['partition'] or not NAME.fullmatch(node['partition']):
-                continue
-            if not node['scheduler_free'] or any(word in node['state'] for word in ['DOWN', 'DRAIN', 'NOT_RESPOND', 'FAIL', 'MAINT']):
-                continue
-            result = submit(remote, node, args.run_sbatch, remote_root, args.min_free_mib,
-                            args.pending_timeout, args.admission_timeout, args.output, args.export)
-            attempts.append(result)
-            if result['state'] == 'ADMITTED_NOT_GPU_VERIFIED':
-                print(json.dumps({'version': VERSION, 'state': result['state'], 'attempts': attempts}))
-                return 0
-        print(json.dumps({'version': VERSION, 'state': 'NO_ADMITTED_GPU', 'attempts': attempts}))
-        return 1
+        def candidates():
+            current = parse_nodes(remote('scontrol show nodes -o'))
+            return [node for node in current if (not args.nodes or node['node'] in args.nodes)
+                    and NAME.fullmatch(node['partition'])]
+        result = launch_candidates(candidates,
+            lambda node: submit(remote, node, args.run_sbatch, remote_root, args.min_free_mib,
+                                args.pending_timeout, args.admission_timeout, args.output, args.export),
+            args.retry_rounds, args.retry_delay)
+        print(json.dumps({'version': VERSION, **result}))
+        return 0 if result['state'] == 'ADMITTED_NOT_GPU_VERIFIED' else 1
     report = []
     for node in nodes:
         name = node['node']

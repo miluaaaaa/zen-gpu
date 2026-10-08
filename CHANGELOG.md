@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add progress-based retry phases, configurable bounded rounds, scheduler refresh
+  between rounds and candidate-only backoff; stop retrying after workload handoff.
+
 - Add `--run-sbatch`: check the allocated single GPU and start the existing
   workload in the same Slurm job, eliminating the release/resubmit race.
 - Fail closed on occupied cards or unavailable admission evidence, distinguish

@@ -46,7 +46,7 @@ def submit(remote, node, script, root, minimum, timeout, gate_timeout=60, output
     job = remote(shlex.join(command)).strip().split(';')[0]
     if not re.fullmatch(r'[0-9]+', job):
         raise ValueError('invalid sbatch job ID')
-    result = {'job_id': job, 'node': node['node'], 'admission_file': evidence}
+    result = {'job_id': job, 'node': node['node'], 'admission_file': evidence, 'phase': 'WAITING_ALLOCATION'}
     pending_since = time.monotonic()
     gate_since = None
     handed_off = False
@@ -56,8 +56,10 @@ def submit(remote, node, script, root, minimum, timeout, gate_timeout=60, output
             if raw.strip():
                 admission = json.loads(raw)
                 result.update(admission)
+                result['phase'] = 'CHECKING_ALLOCATION'
                 if admission['state'] == 'ADMITTED_NOT_GPU_VERIFIED':
                     handed_off = True
+                    result['phase'] = 'HANDED_OFF'
                 return result
             queued = remote('squeue -h -j ' + job + ' -o %T').strip()
             now = time.monotonic()
@@ -66,12 +68,14 @@ def submit(remote, node, script, root, minimum, timeout, gate_timeout=60, output
                     result.update(state='PENDING_TIMEOUT', reason='allocation not obtained within timeout')
                     return result
             elif queued in ('RUNNING', 'CONFIGURING', 'COMPLETING'):
+                result['phase'] = 'CHECKING_ALLOCATION'
                 if gate_since is None:
                     gate_since = now
                 if now - gate_since >= gate_timeout:
                     result.update(state='ADMISSION_TIMEOUT', reason='no admission evidence')
                     return result
             else:
+                result['phase'] = 'CHECKING_ALLOCATION'
                 result.update(state='ADMISSION_FAILED', reason='job ended without admission evidence')
                 return result
             time.sleep(1)
