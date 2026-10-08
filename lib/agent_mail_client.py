@@ -6,6 +6,28 @@ from pathlib import Path
 import urllib.request
 from urllib.parse import urlparse
 import uuid
+from datetime import datetime, timezone
+
+
+COORDINATION_STATES = ('REQUEST', 'ACCEPT', 'REJECT', 'DEFER', 'CONFIRM', 'EXECUTED', 'BLOCKED')
+
+
+def coordination_body(agreement, state, expires_at, text, evidence=None):
+    """Encode a peer's decision, not a resource reservation or execution command."""
+    if not agreement or not agreement.strip() or state not in COORDINATION_STATES:
+        raise ValueError('An agreement ID and a valid decision state are required')
+    expiry = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+    if expiry.tzinfo is None or expiry <= datetime.now(timezone.utc):
+        raise ValueError('expires-at must have a timezone and be in the future')
+    if not text or not text.strip():
+        raise ValueError('Describe the concrete action, conditions or blocker')
+    if evidence is not None and not isinstance(evidence, dict):
+        raise ValueError('Evidence must be a JSON object')
+    if state == 'EXECUTED' and (not isinstance(evidence, dict) or not evidence):
+        raise ValueError('EXECUTED requires a nonempty evidence JSON object')
+    return json.dumps({'protocol': 'zen-peer-negotiation/v1', 'agreement': agreement,
+        'state': state, 'expires_at': expiry.isoformat(), 'detail': text,
+        'evidence': evidence or {}}, ensure_ascii=False)
 
 
 def rpc(config, name, arguments):
@@ -63,7 +85,7 @@ def arguments_for(config, command, peer, **values):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['peers', 'inbox', 'send', 'reply', 'read', 'ack', 'notifications'])
+    parser.add_argument('command', choices=['peers', 'inbox', 'send', 'reply', 'read', 'ack', 'notifications', 'negotiate'])
     parser.add_argument('--config', default=os.environ.get('ZEN_AGENT_MAIL_CONFIG',
         str(Path.home() / '.config/zen-gpu/agent-mail.json')))
     parser.add_argument('--peer-id')
@@ -74,6 +96,10 @@ def main():
     parser.add_argument('--thread', default='gpu-coordination')
     parser.add_argument('--message-id', type=int)
     parser.add_argument('--unread-only', action='store_true')
+    parser.add_argument('--agreement')
+    parser.add_argument('--state', choices=COORDINATION_STATES)
+    parser.add_argument('--expires-at')
+    parser.add_argument('--evidence-file', help='JSON object with checkable execution evidence')
     args = parser.parse_args()
     config = json.loads(Path(args.config).read_text())
     if args.command == 'peers':
@@ -88,13 +114,24 @@ def main():
     else:
         if args.peer_id not in config['peers']:
             parser.error('--peer-id must name a configured peer')
-        if args.command in ('send', 'reply'):
+        if args.command in ('send', 'reply', 'negotiate'):
             if bool(args.text) == bool(args.message_file):
                 parser.error('Specify exactly one of --text or --message-file')
             if args.message_file:
                 args.text = Path(args.message_file).read_text()
-            if args.command == 'send' and (not args.to or any(p not in config['peers'] for p in args.to)):
+            if args.command in ('send', 'negotiate') and (not args.to or any(p not in config['peers'] for p in args.to)):
                 parser.error('--to must name configured recipients')
+        if args.command == 'negotiate':
+            if not args.agreement or not args.state or not args.expires_at:
+                parser.error('negotiate requires --agreement, --state and --expires-at')
+            try:
+                evidence = json.loads(Path(args.evidence_file).read_text()) if args.evidence_file else None
+                args.text = coordination_body(args.agreement, args.state, args.expires_at, args.text, evidence)
+            except (ValueError, OSError) as error:
+                parser.error(str(error))
+            args.thread = 'agreement-' + args.agreement
+            args.subject = args.state + ': ' + args.agreement
+            args.command = 'send'
         if args.command in ('reply', 'read', 'ack') and args.message_id is None:
             parser.error('--message-id is required')
         tool, values = arguments_for(config, args.command, args.peer_id,

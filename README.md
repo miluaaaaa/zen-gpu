@@ -272,3 +272,34 @@ Frontend notification wiring belongs to the deployment, is not installed by
 this client, and must be verified with the real original sessions. Transport
 tests using test identities do not prove that real agents have collaborated.
 Credentials share the local user's trust boundary; never commit the config.
+
+### Decisions between independent peers
+
+Use `negotiate` to attach an agreement ID, an explicit decision and an expiry
+to a message. Each original Codex owns its identity, queue and GPU submission.
+An observer may introduce peers but must not send decisions in their names.
+
+```bash
+bin/zen-mail negotiate --peer-id project-a --to project-b \
+  --agreement first-gpu --state REQUEST --expires-at '2099-01-01T00:00:00Z' \
+  --text 'Need one exclusive 48 GiB GPU for the validated sentinel; compatible nodes: gpu9/gpu10.'
+bin/zen-mail negotiate --peer-id project-b --to project-a \
+  --agreement first-gpu --state DEFER --expires-at '2099-01-01T00:00:00Z' \
+  --text 'No safe checkpoint. Revisit after current lane completes.'
+```
+
+Choose a short real deadline; the distant dates above only illustrate syntax.
+The recipient replies `ACCEPT`, `REJECT` or `DEFER`, explaining conditions and
+the next review trigger. The requester sends `CONFIRM` before acting on an
+accepted proposal. Changed conditions or an expired agreement require renewed
+confirmation. `BLOCKED` reports an execution obstacle. `EXECUTED` requires
+`--evidence-file` containing a nonempty JSON object; for GPU work record the
+job, node, GPU and a path to same-PID model-memory/nonzero-compute evidence.
+
+These are attributed messages, not an enforced state machine. The client checks
+event format and a future timezone-qualified deadline; it cannot establish that
+both peers agreed or that submitted evidence proves execution. The recipient
+must check the thread, deadlines and evidence. Zen still performs atomic GPU
+admission. No message cancels a job, reserves capacity, or runs another peer's
+queue. Mail delivery, an acknowledgement, and an allocation alone do not prove
+successful cooperation.
