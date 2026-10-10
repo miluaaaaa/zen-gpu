@@ -64,6 +64,7 @@ zen-gpu --help
 | `partial_ready` | Some probed UUIDs are clean while other cards are occupied. |
 | `busy` | Completed telemetry covered the scheduler-free count and found no clean card. |
 | `scheduler_full` | Slurm currently has no unallocated GPU resource on this node. |
+| `unschedulable` | Node has no usable Slurm partition; no probe is submitted. |
 | `unverified` | Telemetry is missing, expired, incomplete, or the probe failed/timed out. |
 | `unavailable` | Node is down, draining, failing, or under maintenance. |
 
@@ -303,3 +304,21 @@ must check the thread, deadlines and evidence. Zen still performs atomic GPU
 admission. No message cancels a job, reserves capacity, or runs another peer's
 queue. Mail delivery, an acknowledgement, and an allocation alone do not prove
 successful cooperation.
+
+### Shared probe hygiene
+
+Clients sharing `ZEN_CACHE_DIR` use a nonblocking per-node lock: a concurrent
+caller reports `probe_action=already_in_progress` and unverified telemetry rather
+than submitting another probe. Complete busy coverage is reused for at most
+30 seconds (`--probe-cooldown 0` forces a new probe). Host, SSH identity, remote
+root, scheduler snapshot, memory threshold, job ID and coverage must match;
+partial coverage and clean results are always re-probed by `-a`. This only
+reduces telemetry jobs; workload admission still checks its own allocated GPU.
+Separate caches or machines do not share this lock.
+
+Probe jobs are tracked under `CACHE/probe-jobs`. TERM, INT and HUP trigger
+cancellation of the owned probe even when scheduler queries fail. The client
+also bounds the entire probe with GNU `timeout`, sends TERM before forced
+termination, and never promotes a failed or unknown accounting state to success
+based on log contents. SIGKILL, host failure or an unreachable scheduler can
+still prevent cancellation; tracking records retain the job ID for recovery.
