@@ -11,6 +11,7 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
+from probe_cache import context_key, probe_lock, reusable_busy
 from atomic_submit import submit
 from retry_policy import launch_candidates
 from peer_client import call as peer_call
@@ -78,6 +79,7 @@ def main(argv=None):
     p.add_argument('--probe-only', action='store_true', help='telemetry-only compatibility flag')
     p.add_argument('--min-free-mib', type=int, default=30000)
     p.add_argument('--pending-timeout', type=int, default=15)
+    p.add_argument('--probe-cooldown', type=int, default=30, help='reuse identical complete busy telemetry for up to this many seconds; 0 forces probing')
     p.add_argument('--max-age', type=int, default=120)
     p.add_argument('--json', action='store_true')
     p.add_argument('--version', action='version', version='zen-gpu ' + VERSION)
@@ -93,7 +95,7 @@ def main(argv=None):
         p.error('node names may contain letters, numbers, underscores, dots and hyphens')
     if args.run_sbatch and (args.again or args.probe_only):
         p.error('--run-sbatch cannot be combined with telemetry-only probing')
-    if args.min_free_mib < 0 or args.pending_timeout < 1 or args.max_age < 1 or args.admission_timeout < 1 or args.retry_rounds < 1 or args.retry_delay < 1:
+    if args.probe_cooldown < 0 or args.min_free_mib < 0 or args.pending_timeout < 1 or args.max_age < 1 or args.admission_timeout < 1 or args.retry_rounds < 1 or args.retry_delay < 1:
         p.error('invalid memory threshold or timeout')
     ssh = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10']
     if args.ssh_key:
@@ -198,20 +200,40 @@ def main(argv=None):
         state_path = state_dir / (name + '.env')
         state = read_state(state_path)
         probe_rc = None
-        if args.again and node['scheduler_free'] and not unavailable:
+        if args.again and node['scheduler_free'] and not unavailable and NAME.fullmatch(node['partition']):
             env = os.environ.copy()
             env.update(ZEN_HOST=args.host or '', ZEN_SSH_KEY=args.ssh_key or '', ZEN_LOCAL='1' if args.local else '0',
                        ZEN_REMOTE_ROOT=remote_root, ZEN_PARTITION=node['partition'], ZEN_CACHE_DIR=str(cache),
                        ZEN_STATE_DIR=str(state_dir), ZEN_PROBE_GPUS=str(node['scheduler_free']),
                        ZEN_PROBE_PENDING_TIMEOUT_SECONDS=str(args.pending_timeout), ZEN_READY_MIN_FREE_MIB=str(args.min_free_mib))
-            # Scripts emit no credentials; keep diagnostics separate from JSON stdout.
-            result = subprocess.run(['bash', str(ROOT / 'lib/probe_via_job.sh'), name], env=env,
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            log = cache / (name + '-last-probe.log')
-            log.write_text(result.stdout)
-            probe_rc = result.returncode
-            state = read_state(state_path)
-            node['probe_log'] = str(log)
+            context = context_key(args.host, args.local, remote_root, args.ssh_key, node, args.min_free_mib)
+            metadata_path = state_dir / (name + '.probe.json')
+            with probe_lock(state_dir / (name + '.probe.lock')) as acquired:
+                state = read_state(state_path)
+                try:
+                    metadata = json.loads(metadata_path.read_text())
+                except (OSError, ValueError):
+                    metadata = {}
+                if not acquired:
+                    probe_rc = 1
+                    node['probe_action'] = 'already_in_progress'
+                elif reusable_busy(state, metadata, context, node['scheduler_free'], args.probe_cooldown, args.max_age):
+                    node['probe_action'] = 'reused_busy'
+                else:
+                    env['ZEN_PROBE_TRACK_DIR'] = str(cache / 'probe-jobs')
+                    # GNU timeout sends TERM first, allowing the job-owner cleanup trap.
+                    result = subprocess.run(['timeout', '--signal=TERM', '--kill-after=15s',
+                                            str(args.pending_timeout + 180), 'bash',
+                                            str(ROOT / 'lib/probe_via_job.sh'), name], env=env,
+                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                    log = cache / (name + '-last-probe.log')
+                    log.write_text(result.stdout)
+                    probe_rc = result.returncode
+                    state = read_state(state_path)
+                    if probe_rc == 0:
+                        metadata_path.write_text(json.dumps({'context': context, 'job_id': state.get('JOB_ID')}))
+                    node['probe_action'] = 'submitted'
+                    node['probe_log'] = str(log)
         measured = int(state.get('PROBED_AT', '0'))
         age = int(time.time()) - measured
         clean = int(state.get('GPU_READY_COUNT', '0'))
@@ -221,6 +243,8 @@ def main(argv=None):
         valid = fresh and state.get('FINAL_STATE') == 'COMPLETED' and probe_rc in (None, 0)
         if unavailable:
             status = 'unavailable'
+        elif not NAME.fullmatch(node['partition']):
+            status = 'unschedulable'
         elif not node['scheduler_free']:
             status = 'scheduler_full'
         elif not valid:

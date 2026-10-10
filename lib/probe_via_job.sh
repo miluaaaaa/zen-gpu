@@ -45,11 +45,10 @@ source "${SCRIPT_DIR}/node_state_lib.sh"
 cleanup_probe_job_on_exit() {
   local rc=$?
   if [[ "${probe_cleanup_enabled}" == "1" && -n "${job_id}" ]]; then
-    if probe_job_active "${job_id}"; then
-      echo "[probe_via_job] interrupted/exit cleanup job_id=${job_id} node=${NODE_NAME}; scancel" >&2
-      scancel_probe_job "${job_id}"
-      write_probe_tracking "${job_id}" "CANCELLED_BY_LOCAL_EXIT" "${submitted_at_epoch:-}"
-    fi
+    # Cancellation is idempotent. A failed squeue must not suppress cleanup.
+    echo "[probe_via_job] interrupted/exit cleanup job_id=${job_id} node=${NODE_NAME}; scancel" >&2
+    scancel_probe_job "${job_id}"
+    write_probe_tracking "${job_id}" "CANCEL_REQUESTED_BY_LOCAL_EXIT" "${submitted_at_epoch:-}"
   fi
   exit "${rc}"
 }
@@ -59,6 +58,7 @@ build_ssh_cmd() {
   cmd=(
     ssh
     -o BatchMode=yes
+    -o ConnectTimeout=10
     -o ServerAliveInterval=30
     -o ServerAliveCountMax=3
   )
@@ -288,7 +288,8 @@ chmod +x "${SBATCH_SCRIPT}"
 echo "[probe_via_job] submit node=${NODE_NAME} partition=${PARTITION}"
 job_id="$(submit_probe_job)"
 job_id="${job_id//$'\r'/}"
-if [[ -z "${job_id}" ]]; then
+job_id="${job_id%%;*}"
+if [[ ! "${job_id}" =~ ^[0-9]+$ ]]; then
   echo "[probe_via_job] failed to submit probe job" >&2
   exit 1
 fi
@@ -298,12 +299,17 @@ echo "job_id=${job_id}"
 submitted_at_epoch="$(date +%s)"
 probe_cleanup_enabled=1
 trap cleanup_probe_job_on_exit EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
 write_probe_tracking "${job_id}" "submitted" "${submitted_at_epoch}"
 echo "[probe_via_job] polling every ${PROBE_POLL_SECONDS}s until completion"
+seen_running=0
 while probe_job_active "${job_id}"; do
   queue_state="$(probe_job_queue_state "${job_id}")"
   write_probe_tracking "${job_id}" "${queue_state}" "${submitted_at_epoch}"
-  if [[ "${queue_state}" == "PENDING" && "${PROBE_PENDING_TIMEOUT_SECONDS}" =~ ^[0-9]+$ && "${PROBE_PENDING_TIMEOUT_SECONDS}" -gt 0 ]]; then
+  [[ "${queue_state}" != "RUNNING" ]] || seen_running=1
+  if [[ "${seen_running}" == "0" && "${PROBE_PENDING_TIMEOUT_SECONDS}" =~ ^[0-9]+$ && "${PROBE_PENDING_TIMEOUT_SECONDS}" -gt 0 ]]; then
     now_epoch="$(date +%s)"
     if (( now_epoch - submitted_at_epoch >= PROBE_PENDING_TIMEOUT_SECONDS )); then
       echo "[probe_via_job] pending timeout job_id=${job_id} node=${NODE_NAME} timeout=${PROBE_PENDING_TIMEOUT_SECONDS}s; scancel" >&2
@@ -362,22 +368,15 @@ case "${final_state}" in
 esac
 echo "job_id=${job_id} final_state=${final_state}"
 write_probe_tracking "${job_id}" "${final_state}" "${submitted_at_epoch}"
-probe_cleanup_enabled=0
+case "${final_state}" in
+  COMPLETED|FAILED|CANCELLED|TIMEOUT|NODE_FAIL|OUT_OF_MEMORY|PREEMPTED|BOOT_FAIL|DEADLINE|REVOKED)
+    probe_cleanup_enabled=0 ;;
+esac
 
 out_log="$(probe_log_path out)"
 err_log="$(probe_log_path err)"
 out_content="$(read_probe_log "${out_log}")"
 err_content="$(read_probe_log "${err_log}")"
-
-if [[ "${final_state}" != "COMPLETED" ]]; then
-  output_ready_count="$(printf '%s\n' "${out_content}" | sed -n 's/^MACHINE_READY_COUNT|//p' | tail -n 1)"
-  output_occupied="$(printf '%s\n' "${out_content}" | sed -n 's/^MACHINE_OCCUPIED|//p' | tail -n 1)"
-  if [[ "${output_ready_count}" =~ ^[0-9]+$ && "${output_ready_count}" -ge "${PROBE_GPUS}" && "${output_occupied:-unknown}" != "yes" ]]; then
-    echo "[probe_via_job] accounting final_state=${final_state}, but probe output is complete and ready_count=${output_ready_count}; treating probe as COMPLETED" >&2
-    final_state="COMPLETED"
-    write_probe_tracking "${job_id}" "${final_state}" "${submitted_at_epoch}"
-  fi
-fi
 
 if [[ "${final_state}" == "UNKNOWN" ]]; then
   for _ in $(seq 1 5); do

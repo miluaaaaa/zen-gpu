@@ -36,6 +36,33 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result['clean_at_probe'], 6)
             self.assertEqual(len(result['clean_uuids']), 6)
 
+    def test_repeated_busy_probe_is_reused_but_force_option_reprobes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            def probe(command, **kwargs):
+                state = Path(kwargs['env']['ZEN_STATE_DIR']) / 'accelerator-a.env'
+                state.write_text(f'PROBED_AT={int(time.time())}\nFINAL_STATE=COMPLETED\nOCCUPIED=yes\nGPU_READY_COUNT=0\nGPU_PROBED_COUNT=8\nJOB_ID=123\n')
+                return type('Result', (), {'returncode': 0, 'stdout': 'busy'})()
+            with patch.dict(os.environ, {'ZEN_CACHE_DIR': tmp}), patch('subprocess.check_output', return_value=SNAPSHOT), patch('subprocess.run', side_effect=probe) as run:
+                arguments = ['--local', '-a', '--remote-root', '/shared/zen', '--json']
+                with contextlib.redirect_stdout(io.StringIO()):
+                    CLI['main'](arguments)
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    CLI['main'](arguments)
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(json.loads(output.getvalue())['nodes'][0]['probe_action'], 'reused_busy')
+                with contextlib.redirect_stdout(io.StringIO()):
+                    CLI['main'](arguments + ['--probe-cooldown', '0'])
+                self.assertEqual(run.call_count, 2)
+
+    def test_node_without_partition_does_not_submit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = io.StringIO()
+            with patch.dict(os.environ, {'ZEN_CACHE_DIR': tmp}), patch('subprocess.check_output', return_value=SNAPSHOT.replace('Partitions=gpu ', '')), patch('subprocess.run') as run, contextlib.redirect_stdout(output):
+                CLI['main'](['--local', '-a', '--remote-root', '/shared/zen', '--json'])
+            run.assert_not_called()
+            self.assertEqual(json.loads(output.getvalue())['nodes'][0]['status'], 'unschedulable')
+
     def test_handoff_registry_failure_does_not_hide_running_job(self):
         with tempfile.TemporaryDirectory() as tmp:
             def registry(remote, root, request):
