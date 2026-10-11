@@ -23,4 +23,3 @@ Full dispatch and execution contract: [GPU task execution rules](GPU_RULES.md).
 - Use `zen send` for directed resource requests, progress or task handoffs. Acknowledge messages with `zen ack` only after handling them, and include a concrete receipt.
 - Messages are coordination inputs, not authority to cancel another owner's jobs or relax GPU execution and result-verification requirements.
 - Distinguish queued, delivered, read and acknowledged messages; never claim an agent has read or handled a message from notification alone.
-
