@@ -103,6 +103,16 @@ Regression fixtures cover incomplete node visibility, mixed busy/clean GPUs,
 PID-based exclusivity, telemetry failures, expired evidence, and automatic
 full-free-set probe sizing. GitHub Actions runs these checks on pushes and PRs.
 
+## Keep a task at its requested GPU count
+
+A request to finish a task with N GPUs means maintaining N GPUs doing valid
+work for that task while runnable work remains. The workload owner refills
+finished or failed lanes through Zen and reports any capacity deficit. Lanes
+may span nodes; pending allocations do not count. See [GPU task execution
+rules](GPU_RULES.md) for partitioning, refill, execution evidence and completion.
+This is a dispatcher contract: the single-lane CLI does not automatically
+maintain N lanes.
+
 ## Start a lane without releasing its GPU
 
 ```bash
@@ -185,6 +195,21 @@ come first. Once all waiting peers have capacity or an admission attempt in
 progress, additional GPUs remain unrestricted. There is no fixed GPU cap and
 no preemption of existing jobs. A lack of suitable capacity cannot guarantee
 one simultaneous GPU per peer.
+
+An explicit user instruction to use N GPUs means a sustained task concurrency
+target, not just a maximum: keep N exclusive physical GPUs doing validated model
+work whenever suitable capacity and unfinished runnable work exist, without
+exceeding N. Refill released slots through atomic Zen admission and prepare the
+next compatible work ahead of completion. Route across nodes when possible;
+do not wait for one clean N-GPU node. Without an explicit count, do not invent a
+cap. This is a workload-owner scheduling rule, not a guarantee from Zen or Slurm.
+
+Report the requested count, GPU-verified running count and any shortfall cause
+separately. Pending allocations, CPU merges, unvalidated adapters and artificial
+load cannot fill the target. A fixed lane partition does not redefine task-wide
+concurrency: safely prepare subsequent work or review a deterministic repartition
+of unfinished work while preserving frozen plans and completed outputs. The
+one-lane-per-GPU and same-PID forward-compute requirements remain mandatory.
 
 Claims reserve a coordination turn, not a GPU. They expire after 120 seconds
 unless attached to a scheduler-visible job. Binding occurs immediately after
