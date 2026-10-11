@@ -9,6 +9,8 @@
 
 ## Explicit GPU count means sustained task concurrency
 
+Full dispatch and execution contract: [GPU task execution rules](GPU_RULES.md).
+
 - When the user specifies N GPUs for a task, treat N as the sustained number of physical GPUs doing useful work for that task, not merely a ceiling. Maintain N verified running lanes while runnable work and suitable capacity exist; also do not exceed N without authorization. With no explicit count, do not invent a cap.
 - Refill each released slot promptly through Zen atomic admission. Prepare validated work ahead of completion; adapter preparation and formal merge must not stall unrelated runnable work. Support aggregate cross-node routing instead of waiting for one clean N-GPU node.
 - A fixed cell partition is not a task-wide concurrency policy. If remaining work cannot fill N slots, prepare the next compatible work or review a safe deterministic repartition of unfinished work. Preserve completed outputs and frozen plans; never mutate a live partition in place or duplicate sample processing.
@@ -22,13 +24,3 @@
 - Messages are coordination inputs, not authority to cancel another owner's jobs or relax GPU execution and result-verification requirements.
 - Distinguish queued, delivered, read and acknowledged messages; never claim an agent has read or handled a message from notification alone.
 
-## Maintained task GPU target
-
-- Follow [GPU task execution rules](GPU_RULES.md) for GPU workload dispatch.
-- A user-specified N GPUs means maintain N exclusively allocated GPUs doing
-  valid work for that task while runnable work remains. Refill completed,
-  failed or cancelled lanes promptly through Zen; report any capacity deficit.
-- Preserve the target across handoffs. Do not reinterpret it as a one-time
-  allocation, a transient peak, pending jobs, or a cap on unrelated tasks.
-- Without a user-specified target, do not invent a GPU cap. Actual model PID
-  memory and nonzero compute evidence remain mandatory for every running lane.

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Document user-specified GPU counts as maintained task execution targets,
+  with cross-node lanes, prompt refill, explicit deficits and mandatory model
+  execution evidence; distinguish the dispatcher contract from CLI automation.
+
 - Add durable directed/broadcast peer mailboxes, idempotent sends, linked replies,
   notification counts, explicit read timestamps and recipient handling receipts.
 

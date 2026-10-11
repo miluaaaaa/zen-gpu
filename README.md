@@ -103,16 +103,6 @@ Regression fixtures cover incomplete node visibility, mixed busy/clean GPUs,
 PID-based exclusivity, telemetry failures, expired evidence, and automatic
 full-free-set probe sizing. GitHub Actions runs these checks on pushes and PRs.
 
-## Keep a task at its requested GPU count
-
-A request to finish a task with N GPUs means maintaining N GPUs doing valid
-work for that task while runnable work remains. The workload owner refills
-finished or failed lanes through Zen and reports any capacity deficit. Lanes
-may span nodes; pending allocations do not count. See [GPU task execution
-rules](GPU_RULES.md) for partitioning, refill, execution evidence and completion.
-This is a dispatcher contract: the single-lane CLI does not automatically
-maintain N lanes.
-
 ## Start a lane without releasing its GPU
 
 ```bash
@@ -210,6 +200,9 @@ load cannot fill the target. A fixed lane partition does not redefine task-wide
 concurrency: safely prepare subsequent work or review a deterministic repartition
 of unfinished work while preserving frozen plans and completed outputs. The
 one-lane-per-GPU and same-PID forward-compute requirements remain mandatory.
+See [GPU task execution rules](GPU_RULES.md) for the complete contract. Zen's
+single-lane CLI does not automatically maintain N lanes; the workload owner
+implements reconciliation and refill.
 
 Claims reserve a coordination turn, not a GPU. They expire after 120 seconds
 unless attached to a scheduler-visible job. Binding occurs immediately after
