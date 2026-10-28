@@ -8,10 +8,11 @@ fi
 
 NODE_NAME="$1"
 PROBE_GPUS="${ZEN_PROBE_GPUS:-2}"
+PROBE_JOB_NAME="${ZEN_PROBE_JOB_NAME:-probe_${NODE_NAME}}"
 job_id=""
 probe_cleanup_enabled=0
 PARTITION="${ZEN_PARTITION:?Set ZEN_PARTITION to a Slurm GPU partition}"
-if [[ ! "${NODE_NAME}" =~ ^[a-zA-Z0-9_.-]+$ || ! "${PARTITION}" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+if [[ ! "${NODE_NAME}" =~ ^[a-zA-Z0-9_.-]+$ || ! "${PARTITION}" =~ ^[a-zA-Z0-9_.-]+$ || ! "${PROBE_JOB_NAME}" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
   echo "[zen] invalid node or partition" >&2
   exit 2
 fi
@@ -163,7 +164,7 @@ EOF
 
 probe_log_path() {
   local ext="$1"
-  printf '%s/probe_%s-%s.%s\n' "${LOG_DIR}" "${NODE_NAME}" "${job_id}" "${ext}"
+  printf '%s/%s-%s.%s\n' "${LOG_DIR}" "${PROBE_JOB_NAME}" "${job_id}" "${ext}"
 }
 
 read_probe_log() {
@@ -197,7 +198,7 @@ read_scheduler_snapshot() {
 
 cat > "${SBATCH_SCRIPT}" <<EOF
 #!/usr/bin/env bash
-#SBATCH -J probe_${NODE_NAME}
+#SBATCH -J ${PROBE_JOB_NAME}
 #SBATCH -p ${PARTITION}
 #SBATCH -w ${NODE_NAME}
 #SBATCH --gres=gpu:${PROBE_GPUS}

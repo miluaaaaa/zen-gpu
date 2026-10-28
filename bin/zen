@@ -55,6 +55,7 @@ def main(argv=None):
     p.add_argument('--ssh-key', default=os.environ.get('ZEN_SSH_KEY'))
     p.add_argument('--remote-root', default=os.environ.get('ZEN_REMOTE_ROOT'), help='absolute job-visible log/work directory')
     p.add_argument('-a', '--again', action='store_true', help='submit short telemetry jobs for scheduler-free GPUs')
+    p.add_argument('--probe-gpus', type=int, help='maximum GPUs per sequential telemetry probe; default: all scheduler-free GPUs')
     p.add_argument('--run-sbatch', help='job-visible workload script; admit and execute in the same single-GPU allocation')
     p.add_argument('--peer-id', default=os.environ.get('ZEN_PEER_ID'), help='shared workstream identity for fair admission')
     p.add_argument('--registry-root', default=os.environ.get('ZEN_REGISTRY_ROOT'), help='shared login-host registry directory')
@@ -95,7 +96,7 @@ def main(argv=None):
         p.error('node names may contain letters, numbers, underscores, dots and hyphens')
     if args.run_sbatch and (args.again or args.probe_only):
         p.error('--run-sbatch cannot be combined with telemetry-only probing')
-    if args.probe_cooldown < 0 or args.min_free_mib < 0 or args.pending_timeout < 1 or args.max_age < 1 or args.admission_timeout < 1 or args.retry_rounds < 1 or args.retry_delay < 1:
+    if (args.probe_gpus is not None and args.probe_gpus < 1) or args.probe_cooldown < 0 or args.min_free_mib < 0 or args.pending_timeout < 1 or args.max_age < 1 or args.admission_timeout < 1 or args.retry_rounds < 1 or args.retry_delay < 1:
         p.error('invalid memory threshold or timeout')
     ssh = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10']
     if args.ssh_key:
@@ -204,7 +205,8 @@ def main(argv=None):
             env = os.environ.copy()
             env.update(ZEN_HOST=args.host or '', ZEN_SSH_KEY=args.ssh_key or '', ZEN_LOCAL='1' if args.local else '0',
                        ZEN_REMOTE_ROOT=remote_root, ZEN_PARTITION=node['partition'], ZEN_CACHE_DIR=str(cache),
-                       ZEN_STATE_DIR=str(state_dir), ZEN_PROBE_GPUS=str(node['scheduler_free']),
+                       ZEN_STATE_DIR=str(state_dir), ZEN_PROBE_GPUS=str(min(node['scheduler_free'], args.probe_gpus or node['scheduler_free'])),
+                       ZEN_PROBE_JOB_NAME=args.peer_id or 'probe_' + name,
                        ZEN_PROBE_PENDING_TIMEOUT_SECONDS=str(args.pending_timeout), ZEN_READY_MIN_FREE_MIB=str(args.min_free_mib))
             context = context_key(args.host, args.local, remote_root, args.ssh_key, node, args.min_free_mib)
             metadata_path = state_dir / (name + '.probe.json')
