@@ -44,6 +44,26 @@ class AdmissionTests(unittest.TestCase):
         with self.assertRaises(OSError):
             check({'CUDA_VISIBLE_DEVICES': '0', 'SLURM_JOB_GPUS': '0'}, query, 0)
 
+    def test_rejection_preserves_allocation_telemetry(self):
+        evidence = {}
+        def query(args):
+            return 'GPU-a, 123\n' if '--query-compute-apps=gpu_uuid,pid' in args else 'GPU-a, 45000, 96000, 7\n'
+        with self.assertRaisesRegex(ValueError, 'compute process 123'):
+            check({'CUDA_VISIBLE_DEVICES': '0', 'SLURM_JOB_GPUS': '5'}, query, 30000, evidence)
+        self.assertEqual(evidence['gpu_uuid'], 'GPU-a')
+        self.assertEqual(evidence['compute_processes_raw'], 'GPU-a, 123\n')
+        self.assertEqual(evidence['memory_used_mib'], 45000)
+        self.assertEqual(evidence['utilization_gpu'], 7)
+        self.assertEqual(evidence['slurm_job_gpus'], '5')
+
+    def test_nonzero_utilization_without_pid_still_rejects(self):
+        evidence = {}
+        def query(args):
+            return '' if '--query-compute-apps=gpu_uuid,pid' in args else 'GPU-a, 0, 96000, 1\n'
+        with self.assertRaisesRegex(ValueError, 'utilization=1%'):
+            check({'CUDA_VISIBLE_DEVICES': '0', 'SLURM_JOB_GPUS': '0'}, query, 30000, evidence)
+        self.assertEqual(evidence['compute_processes_raw'], '')
+
 
 class SubmitTests(unittest.TestCase):
     def run_attempt(self, evidence, queue='RUNNING', timeout=15):
