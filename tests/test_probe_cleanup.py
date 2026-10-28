@@ -15,7 +15,7 @@ class ProbeCleanupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
             directory = Path(tmp)
             commands = {
-                'sbatch': 'echo 123',
+                'sbatch': 'cat "${@: -1}" > "$FIXTURE/submitted.sbatch"; echo 123',
                 'squeue': 'test ! -f "$FIXTURE/query-fails" || exit 1; echo PENDING',
                 'scancel': 'echo "$1" >> "$FIXTURE/cancelled"',
             }
@@ -27,6 +27,7 @@ class ProbeCleanupTests(unittest.TestCase):
                        FIXTURE=tmp, ZEN_LOCAL='1', ZEN_PARTITION='fixture',
                        ZEN_REMOTE_ROOT=tmp + '/remote', ZEN_CACHE_DIR=tmp + '/cache',
                        ZEN_PROBE_TRACK_DIR=tmp + '/tracking', ZEN_PROBE_POLL_SECONDS='0.1',
+                       ZEN_PROBE_JOB_NAME='shunongLLM-8E6F',
                        ZEN_PROBE_PENDING_TIMEOUT_SECONDS='30')
             proc = subprocess.Popen(['bash', str(ROOT / 'lib/probe_via_job.sh'), 'fixture'],
                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -37,6 +38,7 @@ class ProbeCleanupTests(unittest.TestCase):
                         self.fail('probe did not enter polling: ' + proc.communicate(timeout=1)[0])
                     time.sleep(0.02)
                 (directory / 'query-fails').touch()
+                self.assertIn('#SBATCH -J shunongLLM-8E6F', (directory / 'submitted.sbatch').read_text())
                 proc.send_signal(signal.SIGTERM)
                 output = proc.communicate(timeout=5)[0]
                 self.assertEqual(proc.returncode, 143, output)

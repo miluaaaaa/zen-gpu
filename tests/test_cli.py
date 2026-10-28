@@ -55,6 +55,23 @@ class CliTests(unittest.TestCase):
                     CLI['main'](arguments + ['--probe-cooldown', '0'])
                 self.assertEqual(run.call_count, 2)
 
+    def test_explicit_probe_budget_and_peer_job_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            def probe(command, **kwargs):
+                env = kwargs['env']
+                self.assertEqual(env['ZEN_PROBE_GPUS'], '2')
+                self.assertEqual(env['ZEN_PROBE_JOB_NAME'], 'shunongLLM-8E6F')
+                (Path(env['ZEN_STATE_DIR']) / 'accelerator-a.env').write_text(
+                    f'PROBED_AT={int(time.time())}\nFINAL_STATE=COMPLETED\nOCCUPIED=no\nGPU_READY_COUNT=2\nGPU_PROBED_COUNT=2\nGPU_READY_UUIDS=GPU-a,GPU-b\nJOB_ID=123\n')
+                return type('Result', (), {'returncode': 0, 'stdout': 'bounded probe'})()
+            output = io.StringIO()
+            with patch.dict(os.environ, {'ZEN_CACHE_DIR': tmp}), patch('subprocess.check_output', return_value=SNAPSHOT), patch('subprocess.run', side_effect=probe), contextlib.redirect_stdout(output):
+                CLI['main'](['--local', '-a', '--remote-root', '/shared/zen', '--json',
+                             '--peer-id', 'shunongLLM-8E6F', '--registry-root', '/shared/registry', '--probe-gpus', '2'])
+            result = json.loads(output.getvalue())['nodes'][0]
+            self.assertEqual(result['clean_at_probe'], 2)
+            self.assertEqual(result['probed'], 2)
+
     def test_node_without_partition_does_not_submit(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = io.StringIO()
