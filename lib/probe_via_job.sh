@@ -164,7 +164,7 @@ EOF
 
 probe_log_path() {
   local ext="$1"
-  printf '%s/probe_%s-%s.%s\n' "${LOG_DIR}" "${NODE_NAME}" "${job_id}" "${ext}"
+  printf '%s/%s-%s.%s\n' "${LOG_DIR}" "${PROBE_JOB_NAME}" "${job_id}" "${ext}"
 }
 
 read_probe_log() {
