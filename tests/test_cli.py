@@ -97,6 +97,38 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result['attempts'][0]['job_id'], '123')
             self.assertIn('coordination_warning', result['attempts'][0])
 
+    def test_elastic_once_reconciles_to_explicit_target_without_registry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            def remote_output(command, **kwargs):
+                command = command[-1] if isinstance(command, list) else command
+                if command == 'scontrol show nodes -o':
+                    return SNAPSHOT
+                if command == 'printf "%s" "$HOME"':
+                    return '/home/test'
+                if command.startswith('squeue --local'):
+                    return '321|RUNNING\n'
+                if command.startswith('sacct --local'):
+                    return ''
+                return ''
+            output = io.StringIO()
+            fake_launch = lambda *args, **kwargs: {
+                'state': 'ADMITTED_NOT_GPU_VERIFIED',
+                'attempts': [{'state': 'ADMITTED_NOT_GPU_VERIFIED', 'phase': 'HANDED_OFF',
+                              'job_id': '321', 'node': 'accelerator-a'}],
+            }
+            state_file = str(Path(tmp) / 'elastic.json')
+            with patch.dict(os.environ, {'ZEN_CACHE_DIR': tmp}), \
+                 patch('subprocess.check_output', side_effect=remote_output), \
+                 patch.dict(CLI['main'].__globals__, launch_candidates=fake_launch), \
+                 contextlib.redirect_stdout(output):
+                rc = CLI['main'](['elastic', '--local', '--run-sbatch', '/shared/lane',
+                                  '--target-gpus', '1', '--once', '--state-file', state_file,
+                                  '--remote-root', '/shared/zen', '--json'])
+            result = json.loads(output.getvalue())
+            self.assertEqual(rc, 0)
+            self.assertEqual(result['state'], 'TARGET_MET')
+            self.assertEqual(result['active_jobs'], ['321'])
+
     def test_scheduler_free_without_telemetry_is_unverified(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = io.StringIO()

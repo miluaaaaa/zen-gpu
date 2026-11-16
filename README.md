@@ -36,6 +36,31 @@ short telemetry jobs and inspects all currently scheduler-free GPUs on each
 candidate node. An eight-card idle node is not classified from only two cards.
 Nodes and partitions are discovered through Slurm; no machine names are hardcoded.
 
+### Elastic lane dispatch
+
+Use the `elastic` action when a workload should keep a requested number of
+validated single-GPU lanes alive and refill lanes after jobs finish. Each lane
+uses the same `--run-sbatch` admission gate as the ordinary single-lane command;
+no legacy registry or fixed node name is required.
+
+```bash
+bin/zen elastic --local \
+  --run-sbatch /shared/project/lane.sbatch \
+  --target-gpus 6 --watch-interval 30
+```
+
+`--target-gpus N` is a sustained target. Pending jobs reserve a refill slot but
+are not reported as running results. Use `--target-gpus auto` to reconcile
+against the current scheduler-free GPU capacity on every cycle. Add `--once`
+for one reconciliation pass, or `--state-file` to keep lane ownership in an
+explicit local JSON file. The default state file is under the local Zen cache.
+The command only tracks job IDs it admitted and never cancels another workload.
+
+```bash
+bin/zen elastic --local --run-sbatch /shared/project/lane.sbatch \
+  --target-gpus auto --once --json
+```
+
 For a custom SSH key or a shared filesystem:
 
 ```bash

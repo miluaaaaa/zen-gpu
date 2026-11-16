@@ -63,7 +63,13 @@ def submit(remote, node, script, root, minimum, timeout, gate_timeout=60, output
                     handed_off = True
                     result['phase'] = 'HANDED_OFF'
                 return result
-            queued = remote('squeue -h -j ' + job + ' -o %T').strip()
+            queued = remote('squeue --local -h -j ' + job + ' -o %T').strip()
+            if not queued:
+                # A just-submitted allocation may be absent from squeue while
+                # the controller already knows it. Absence is not termination.
+                detail = remote('scontrol --local show job ' + job + ' -o 2>/dev/null || true')
+                match = re.search(r'\bJobState=(\w+)', detail)
+                queued = match.group(1) if match else 'UNKNOWN'
             now = time.monotonic()
             if queued == 'PENDING':
                 if now - pending_since >= timeout:
@@ -76,8 +82,15 @@ def submit(remote, node, script, root, minimum, timeout, gate_timeout=60, output
                 if now - gate_since >= gate_timeout:
                     result.update(state='ADMISSION_TIMEOUT', reason='no admission evidence')
                     return result
+            elif queued == 'UNKNOWN':
+                if now - pending_since >= timeout:
+                    result.update(state='ADMISSION_TIMEOUT', reason='job state unavailable before admission')
+                    return result
             else:
                 result['phase'] = 'CHECKING_ALLOCATION'
+                result['scheduler_state'] = queued
+                result['scheduler_detail'] = remote(
+                    'scontrol --local show job ' + job + ' -o 2>/dev/null || true')
                 result.update(state='ADMISSION_FAILED', reason='job ended without admission evidence')
                 return result
             time.sleep(1)

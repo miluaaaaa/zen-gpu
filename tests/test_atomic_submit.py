@@ -66,7 +66,7 @@ class AdmissionTests(unittest.TestCase):
 
 
 class SubmitTests(unittest.TestCase):
-    def run_attempt(self, evidence, queue='RUNNING', timeout=15):
+    def run_attempt(self, evidence, queue='RUNNING', timeout=15, detail='JobState=COMPLETED'):
         calls = []
         def remote(command):
             calls.append(command)
@@ -78,6 +78,8 @@ class SubmitTests(unittest.TestCase):
                 return json.dumps(evidence) if evidence else ''
             if command.startswith('squeue '):
                 return queue
+            if command.startswith('scontrol '):
+                return detail
             return ''
         with patch('atomic_submit.time.sleep'), patch('atomic_submit.time.monotonic', side_effect=range(100)):
             result = submit(remote, {'node': 'node-a', 'partition': 'gpu'}, '/shared/lane.sbatch', '/shared/zen', 30000, timeout)
@@ -106,6 +108,18 @@ class SubmitTests(unittest.TestCase):
     def test_finished_without_admission_is_failure(self):
         result, calls = self.run_attempt(None, '')
         self.assertEqual(result['state'], 'ADMISSION_FAILED')
+        self.assertIn('scancel 321', calls)
+
+    def test_missing_queue_entry_waits_for_controller_running_job(self):
+        result, calls = self.run_attempt(None, '', detail='JobId=321 JobState=RUNNING')
+        self.assertEqual(result['state'], 'ADMISSION_TIMEOUT')
+        self.assertEqual(result['reason'], 'no admission evidence')
+        self.assertTrue(any(c.startswith('scontrol ') for c in calls))
+
+    def test_unknown_job_state_is_bounded_and_not_reported_as_ended(self):
+        result, calls = self.run_attempt(None, '', timeout=2, detail='')
+        self.assertEqual(result['state'], 'ADMISSION_TIMEOUT')
+        self.assertEqual(result['reason'], 'job state unavailable before admission')
         self.assertIn('scancel 321', calls)
 
     def test_array_directive_is_rejected_before_submission(self):

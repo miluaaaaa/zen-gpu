@@ -14,9 +14,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
 from probe_cache import context_key, probe_lock, reusable_busy
 from atomic_submit import submit
 from retry_policy import launch_candidates
+from elastic import active_job_ids, parse_job_states, target_from_arg, terminal_job_ids
 from peer_client import call as peer_call
 
-VERSION = '0.1.0'
+VERSION = '0.2.0'
 ROOT = Path(__file__).resolve().parents[1]
 NAME = re.compile(r'^[A-Za-z0-9_.-]+$')
 
@@ -57,6 +58,10 @@ def main(argv=None):
     p.add_argument('-a', '--again', action='store_true', help='submit short telemetry jobs for scheduler-free GPUs')
     p.add_argument('--probe-gpus', type=int, help='maximum GPUs per sequential telemetry probe; default: all scheduler-free GPUs')
     p.add_argument('--run-sbatch', help='job-visible workload script; admit and execute in the same single-GPU allocation')
+    p.add_argument('--target-gpus', default='1', help='elastic target: positive integer or auto for current scheduler-free capacity')
+    p.add_argument('--watch-interval', type=int, default=30, help='seconds between elastic reconciliation cycles')
+    p.add_argument('--state-file', help='local JSON state file for elastic lane ownership')
+    p.add_argument('--once', action='store_true', help='run one elastic reconciliation cycle and exit')
     p.add_argument('--peer-id', default=os.environ.get('ZEN_PEER_ID'), help='shared workstream identity for fair admission')
     p.add_argument('--registry-root', default=os.environ.get('ZEN_REGISTRY_ROOT'), help='shared login-host registry directory')
     p.add_argument('--project', help='human-readable project/workstream')
@@ -85,11 +90,21 @@ def main(argv=None):
     p.add_argument('--json', action='store_true')
     p.add_argument('--version', action='version', version='zen-gpu ' + VERSION)
     args = p.parse_args(argv)
-    action = args.nodes.pop(0) if args.nodes and args.nodes[0] in ('peers', 'register', 'can-dispatch', 'send', 'inbox', 'outbox', 'ack', 'notifications') else None
+    action = args.nodes.pop(0) if args.nodes and args.nodes[0] in ('peers', 'register', 'can-dispatch', 'send', 'inbox', 'outbox', 'ack', 'notifications', 'elastic') else None
     if action in ('register', 'can-dispatch', 'send', 'inbox', 'outbox', 'ack') and not args.peer_id:
         p.error('register requires --peer-id')
     if args.ready < 0:
         p.error('--ready cannot be negative')
+    if action == 'elastic' and not args.run_sbatch:
+        p.error('elastic requires --run-sbatch')
+    if args.watch_interval < 1:
+        p.error('--watch-interval must be positive')
+    if args.target_gpus != 'auto':
+        try:
+            if int(args.target_gpus) < 1:
+                raise ValueError
+        except ValueError:
+            p.error('--target-gpus must be a positive integer or auto')
     if not args.local and not args.host:
         p.error('provide --host LOGIN_HOST or --local')
     if any(not NAME.fullmatch(node) for node in args.nodes):
@@ -105,11 +120,11 @@ def main(argv=None):
         command = ['bash', '-c', cmd] if args.local else ssh + ['--', args.host, cmd]
         return subprocess.check_output(command, text=True, timeout=30)
     registry_root = args.registry_root
-    if args.peer_id or action:
+    if args.peer_id or (action and action != 'elastic'):
         registry_root = registry_root or remote('printf "%s" "$HOME"').strip() + '/.cache/zen-gpu/coordination'
         if not re.fullmatch(r'/[A-Za-z0-9_./-]+', registry_root):
             p.error('registry root must be an absolute path without shell metacharacters')
-    if action:
+    if action and action != 'elastic':
         request = {'op': action, 'peer_id': args.peer_id, 'project': args.project or args.peer_id,
                    'ready': args.ready, 'nodes': args.nodes, 'job_ids': args.job_id,
                    'note': args.note, 'thread_id': args.thread_id}
@@ -191,6 +206,56 @@ def main(argv=None):
                     attempt['coordination_warning'] = str(exc)
                 attempt['peer_id'] = args.peer_id
             return attempt
+        if action == 'elastic':
+            state_path = Path(args.state_file or (str(cache / 'elastic' / ((args.peer_id or Path(args.run_sbatch).stem) + '.json'))))
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                ownership = json.loads(state_path.read_text()) if state_path.exists() else {'jobs': {}}
+            except (OSError, ValueError):
+                ownership = {'jobs': {}}
+            ownership.setdefault('jobs', {})
+            def scheduler_states(job_ids):
+                if not job_ids:
+                    return {}
+                ids = ','.join(job_ids)
+                raw = remote('squeue --local -h -j ' + shlex.quote(ids) + ' -o "%i|%T" 2>/dev/null || true')
+                states = parse_job_states(raw)
+                missing = [job_id for job_id in job_ids if job_id not in states]
+                if missing:
+                    raw = remote('sacct --local -X -n -p -j ' + shlex.quote(','.join(missing)) + ' --format=JobIDRaw,State 2>/dev/null || true')
+                    states.update(parse_job_states(raw.replace('|', '|')))
+                return states
+            def reconcile():
+                tracked = {str(job_id): value for job_id, value in ownership['jobs'].items()}
+                states = scheduler_states(sorted(tracked))
+                for job_id in terminal_job_ids(states):
+                    tracked.pop(job_id, None)
+                ownership['jobs'] = tracked
+                current = candidates()
+                target = target_from_arg(args.target_gpus, current)
+                reserved = len(active_job_ids(states))
+                attempts = []
+                while reserved < target:
+                    result = launch_candidates(candidates, launch, args.retry_rounds, args.retry_delay)
+                    attempts.extend(result.get('attempts', []))
+                    if result['state'] != 'ADMITTED_NOT_GPU_VERIFIED':
+                        break
+                    job_id = str(result['attempts'][-1]['job_id'])
+                    ownership['jobs'][job_id] = {'node': result['attempts'][-1].get('node'), 'started_at': int(time.time())}
+                    reserved += 1
+                    states = scheduler_states(sorted(ownership['jobs']))
+                state = {'state': 'TARGET_MET' if reserved >= target else 'WAITING_FOR_CAPACITY',
+                         'target_gpus': target, 'target_arg': args.target_gpus,
+                         'active_jobs': active_job_ids(states), 'tracked_jobs': ownership['jobs'],
+                         'attempts': attempts, 'timestamp': int(time.time()), 'state_file': str(state_path)}
+                state_path.write_text(json.dumps(ownership, indent=2, sort_keys=True) + '\n')
+                return state
+            while True:
+                result = reconcile()
+                print(json.dumps({'version': VERSION, **result}, sort_keys=True), flush=True)
+                if args.once or result['state'] == 'TARGET_MET' and args.target_gpus != 'auto':
+                    return 0 if result['state'] == 'TARGET_MET' else 1
+                time.sleep(args.watch_interval)
         result = launch_candidates(candidates, launch, args.retry_rounds, args.retry_delay)
         print(json.dumps({'version': VERSION, **result}))
         return 0 if result['state'] == 'ADMITTED_NOT_GPU_VERIFIED' else 1

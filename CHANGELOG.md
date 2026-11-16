@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add `zen elastic` for sustained single-GPU lane targets, automatic refill after
+  terminal jobs, `auto` capacity tracking, durable local ownership state, and a
+  one-shot reconciliation mode. Elastic dispatch reuses atomic admission and
+  does not depend on the retired project registry.
+
 - Document user-specified GPU counts as maintained task execution targets,
   with cross-node lanes, prompt refill, explicit deficits and mandatory model
   execution evidence; distinguish the dispatcher contract from CLI automation.
